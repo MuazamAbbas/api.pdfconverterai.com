@@ -34,22 +34,22 @@ async def get_rate_limit(key_info: dict = Depends(verify_api_key)):
 protected_dependency = [Depends(verify_api_key), Depends(get_rate_limit)]
 
 # Include routers with /v1 prefix and tags
-app.include_router(ai_tools.router, prefix="/v1", tags=["AI Tools"])  # No protected_dependency for ai_tools
-app.include_router(seo_tools.router, prefix="/v1", tags=["SEO Tools"], dependencies=protected_dependency)
-app.include_router(web_tools.router, prefix="/v1", tags=["Web Tools"], dependencies=protected_dependency)
-app.include_router(downloaders.router, prefix="/v1", tags=["Downloaders"], dependencies=protected_dependency)
-app.include_router(unit_converters.router, prefix="/v1", tags=["Unit Converters"], dependencies=protected_dependency)
-app.include_router(binary_tools.router, prefix="/v1", tags=["Binary Tools"], dependencies=protected_dependency)
-app.include_router(calculators.router, prefix="/v1", tags=["Calculators"], dependencies=protected_dependency)
-app.include_router(cyber_security.router, prefix="/v1", tags=["Cyber Security"], dependencies=protected_dependency)
-app.include_router(miscellaneous.router, prefix="/v1", tags=["Miscellaneous"], dependencies=protected_dependency)
-app.include_router(pdf.router, prefix="/v1", tags=["PDF Tools"], dependencies=protected_dependency)
-app.include_router(text.router, prefix="/v1", tags=["Text Tools"], dependencies=protected_dependency)
-app.include_router(image.router, prefix="/v1", tags=["Image Tools"], dependencies=protected_dependency)
-app.include_router(video.router, prefix="/v1", tags=["Video Tools"], dependencies=protected_dependency)
-app.include_router(categories.router, prefix="/v1", tags=["Categories"], dependencies=protected_dependency)
-app.include_router(tools.router, prefix="/v1", tags=["Tools"], dependencies=protected_dependency)
-app.include_router(debug.router, prefix="/v1", tags=["Debug"], dependencies=protected_dependency)
+app.include_router(ai_tools.router, prefix="/v1", tags=["AI Tools"])
+app.include_router(seo_tools.router, prefix="/v1", tags=["SEO Tools"])
+app.include_router(web_tools.router, prefix="/v1", tags=["Web Tools"])
+app.include_router(downloaders.router, prefix="/v1", tags=["Downloaders"])
+app.include_router(unit_converters.router, prefix="/v1", tags=["Unit Converters"])
+app.include_router(binary_tools.router, prefix="/v1", tags=["Binary Tools"])
+app.include_router(calculators.router, prefix="/v1", tags=["Calculators"])
+app.include_router(cyber_security.router, prefix="/v1", tags=["Cyber Security"])
+app.include_router(miscellaneous.router, prefix="/v1", tags=["Miscellaneous"])
+app.include_router(pdf.router, prefix="/v1", tags=["PDF Tools"])
+app.include_router(text.router, prefix="/v1", tags=["Text Tools"])
+app.include_router(image.router, prefix="/v1", tags=["Image Tools"])
+app.include_router(video.router, prefix="/v1", tags=["Video Tools"])
+app.include_router(categories.router, prefix="/v1", tags=["Categories"])
+app.include_router(tools.router, prefix="/v1", tags=["Tools"])
+app.include_router(debug.router, prefix="/v1", tags=["Debug"])
 
 @app.get("/", summary="Root endpoint")
 async def read_root():
