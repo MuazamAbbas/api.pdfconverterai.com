@@ -35,12 +35,16 @@ async def calculate(request: CalculateRequest, api_key: dict = Depends(verify_ap
             number,
             [
                 ("-", 1, opAssoc.RIGHT),
-                (operator, 2, opAssoc.LEFT),
+                ("+", 2, opAssoc.LEFT),
+                ("-", 2, opAssoc.LEFT),
+                ("*", 2, opAssoc.LEFT),
+                ("/", 2, opAssoc.LEFT),
             ]
         )
-        result = expr.parseString(request.expression)[0]
+        parsed = expr.parseString(request.expression, parseAll=True)
+        result = parsed[0]
         logger.debug("✅ Expression evaluated: %s = %s", request.expression, result)
-        return {"expression": request.expression, "result": result}
+        return {"expression": request.expression, "result": float(result)}
     except ParseException as e:
         logger.error("❌ Invalid expression: %s", str(e))
         raise HTTPException(status_code=400, detail=f"Invalid expression: {str(e)}")

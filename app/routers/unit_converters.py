@@ -29,10 +29,10 @@ async def test_unit_converters():
 async def convert_length(request: LengthConvertRequest, api_key: dict = Depends(verify_api_key)):
     logger.debug("🔧 Converting length: %s %s to %s", request.value, request.from_unit, request.to_unit)
     units = {
-        "meter": 1,
-        "foot": 3.28084,
-        "inch": 39.3701,
-        "kilometer": 0.001
+        "meter": 1.0,  # Base unit
+        "foot": 0.3048,  # 1 meter = 0.3048 feet
+        "inch": 0.0254,  # 1 meter = 0.0254 inches
+        "kilometer": 1000.0  # 1 meter = 1000 kilometers
     }
     if request.from_unit not in units or request.to_unit not in units:
         logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
