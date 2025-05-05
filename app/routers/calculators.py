@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from datetime import datetime
 import logging
 from app.core.security import verify_api_key
 from app.services.calculators.percentage import calculate_percentage
 from app.services.calculators.loan import calculate_loan
+from app.services.calculators.age import calculate_age
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -36,30 +36,15 @@ async def test_calculators(api_key: dict = Depends(verify_api_key)):
     return {"message": "Calculators router is working"}
 
 @router.post("/age", summary="Calculate age from birth date")
-async def calculate_age(request: AgeCalculatorRequest, api_key: dict = Depends(verify_api_key)):
+async def calculate_age_endpoint(request: AgeCalculatorRequest, api_key: dict = Depends(verify_api_key)):
     logger.debug("🔧 Calculating age for birth date: %s", request.birth_date)
     try:
-        # Validate date format
-        try:
-            birth = datetime.strptime(request.birth_date, "%Y-%m-%d")
-        except ValueError as e:
-            logger.error("❌ Invalid date format: %s", str(e))
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-        
-        today = datetime.utcnow()
-        logger.debug("📅 Today: %s, Birth: %s", today, birth)
-        
-        # Check if birth date is in the future
-        if birth > today:
-            logger.error("❌ Birth date is in the future: %s", request.birth_date)
-            raise HTTPException(status_code=400, detail="Birth date cannot be in the future")
-        
-        # Calculate age
-        age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
-        logger.debug("✅ Age calculated: %s years", age)
+        age = calculate_age(request.birth_date)
+        logger.debug("✅ Age result: %s", age)
         return {"birth_date": request.birth_date, "age": age}
-    except HTTPException:
-        raise
+    except ValueError as e:
+        logger.error("❌ Invalid input: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error calculating age: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error calculating age: {str(e)}")
