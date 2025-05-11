@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from transformers import pipeline
 import os
 import shutil
 import PyPDF2
@@ -6,6 +7,7 @@ import pymupdf  # MuPDF for better text extraction
 import logging
 from app.core.security import verify_api_key
 from app.services.pdf.pdf_to_word import convert_pdf_to_word
+from app.services.pdf.summarize import summarize_pdf_service
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -18,6 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pdf", tags=["PDF Tools"])
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
 @router.get("/test", summary="Test PDF Tools endpoint")
 async def test_pdf(api_key: dict = Depends(verify_api_key)):
@@ -110,3 +113,31 @@ async def pdf_to_word(file: UploadFile = File(...), api_key: dict = Depends(veri
     except Exception as e:
         logger.exception("💥 Error converting PDF to Word: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error converting PDF to Word: {str(e)}")
+
+@router.post("/summarize", summary="Summarize PDF content")
+async def summarize_pdf(file: UploadFile = File(...), api_key: dict = Depends(verify_api_key)):
+    logger.debug("📝 Summarizing PDF: %s", file.filename)
+    if not file.filename.endswith(".pdf"):
+        logger.error("❌ File is not a PDF: %s", file.filename)
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+    os.makedirs("/tmp/pdfconverterai", exist_ok=True)
+    file_path = f"/tmp/pdfconverterai/{file.filename}"
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        summary = await summarize_pdf_service(file_path)
+        logger.debug("✅ Summary generated for: %s", file.filename)
+        return {"filename": file.filename, "summary": summary}
+    except ValueError as e:
+        logger.error("❌ Validation error: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("💥 Error summarizing PDF: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error summarizing PDF: {str(e)}")
+    finally:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.debug("🗑️ Removed temporary file: %s", file_path)
+            except Exception as e:
+                logger.error("❌ Failed to remove temporary file %s: %s", file_path, str(e))
