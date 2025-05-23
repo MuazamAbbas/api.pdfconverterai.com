@@ -9,14 +9,79 @@ from app.routers import (
     binary_tools, calculators, cyber_security, miscellaneous,
     pdf, text, image, video, categories, tools, debug
 )
+import logging
+from transformers import pipeline
+
+# Logging setup
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PDFConverterAI API",
     description="API for PDFConverterAI.com tools and RapidAPI distribution",
     version="1.0",
     docs_url="/docs",
-    openapi_url="/openapi.json"
+    openapi_url="/ siano_url="/openapi.json"
 )
+
+# Middleware to log all requests and errors
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.debug(f"📡 Request: {request.method} {request.url}")
+    try:
+        response = await call_next(request)
+        logger.debug(f"✅ Response: {response.status_code}")
+        return response
+    except Exception as e:
+        logger.exception(f"💥 Middleware error: {str(e)}")
+        raise
+
+# Preload essential Hugging Face models
+logger.info("🚀 Starting to preload essential Hugging Face models")
+try:
+    logger.debug("Loading paraphrase model: sentence-transformers/paraphrase-MiniLM-L6-v2")
+    app.state.paraphrase_pipeline = pipeline("text2text-generation", model="sentence-transformers/paraphrase-MiniLM-L6-v2", device="cpu")
+    logger.debug("✅ Paraphrase model loaded successfully")
+except Exception as e:
+    logger.error("❌ Failed to load paraphrase_pipeline: %s", str(e))
+    raise
+
+try:
+    logger.debug("Loading summarization model: t5-small")
+    app.state.summarize_pipeline = pipeline("summarization", model="t5-small", device="cpu")
+    logger.debug("✅ Summarization model loaded successfully")
+except Exception as e:
+    logger.error("❌ Failed to load summarize_pipeline: %s", str(e))
+    raise
+logger.info("✅ Essential models preloaded successfully")
+
+# Verify pipeline state
+try:
+    logger.debug("Verifying paraphrase_pipeline state")
+    if not hasattr(app.state.paraphrase_pipeline, "model"):
+        logger.error("❌ paraphrase_pipeline is invalid or not initialized")
+        raise ValueError("Invalid paraphrase_pipeline")
+    logger.debug("✅ paraphrase_pipeline state verified")
+except Exception as e:
+    logger.error("❌ paraphrase_pipeline verification failed: %s", str(e))
+    raise
+
+try:
+    logger.debug("Verifying summarize_pipeline state")
+    if not hasattr(app.state.summarize_pipeline, "model"):
+        logger.error("❌ summarize_pipeline is invalid or not initialized")
+        raise ValueError("Invalid summarize_pipeline")
+    logger.debug("✅ summarize_pipeline state verified")
+except Exception as e:
+    logger.error("❌ summarize_pipeline verification failed: %s", str(e))
+    raise
 
 # Add CORS middleware for RapidAPI
 app.add_middleware(
@@ -63,14 +128,36 @@ app.include_router(debug.router, prefix="/v1", tags=["Debug"], dependencies=prot
 
 @app.get("/", summary="Root endpoint")
 async def read_root():
+    logger.debug("📡 Accessing root endpoint")
     return {"message": "PDFConverterAI API is running"}
 
 @app.get("/health", summary="Health check")
 @limiter.limit("5/minute")
 async def health_check(request: Request):
+    logger.debug("🩺 Accessing health check endpoint")
     return {"status": "healthy"}
 
 @app.get("/ping", summary="Ping endpoint")
 @limiter.limit("5/minute")
 async def ping(request: Request):
+    logger.debug("🏓 Accessing ping endpoint")
     return {"message": "pong"}
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("🚀 Starting PDFConverterAI API")
+    logger.debug("✅ Startup event completed")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("🛑 Shutting down PDFConverterAI API")
+    try:
+        if hasattr(app.state, "summarize_pipeline"):
+            logger.debug("🧹 Cleaning up summarize_pipeline")
+            del app.state.summarize_pipeline
+        if hasattr(app.state, "paraphrase_pipeline"):
+            logger.debug("🧹 Cleaning up paraphrase_pipeline")
+            del app.state.paraphrase_pipeline
+        logger.debug("✅ Shutdown event completed")
+    except Exception as e:
+        logger.error("❌ Error during shutdown: %s", str(e))
