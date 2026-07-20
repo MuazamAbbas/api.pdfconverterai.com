@@ -4,6 +4,8 @@ from fastapi import HTTPException, Header, Request
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime
 
+from app.core.config import settings
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -17,9 +19,7 @@ logger = logging.getLogger(__name__)
 async def verify_api_key(x_api_key: str = Header(...), request: Request = None):
     logger.debug("🧪 Verifying API key: %s", x_api_key)
     try:
-        client = AsyncIOMotorClient(
-            os.getenv("MONGODB_URL", "mongodb://admin:SZuSTH7fVEgGbg32fqjt@localhost:27017/pdfconverterai?authSource=admin")
-        )
+        client = AsyncIOMotorClient(settings.database_url)
         db = client["pdfconverterai"]
         key_data = await db.api_keys.find_one({"key": x_api_key, "status": "active"})
         
