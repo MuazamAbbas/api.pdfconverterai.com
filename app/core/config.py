@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_name: str = "PDFConverterAI"
     app_env: str = "production"
-    database_url: str = "mongodb://admin:SZuSTH7fVEgGbg32fqjt@localhost:27017/pdfconverterai?authSource=admin"
+    database_url: str
     allowed_origins: str = "https://pdfconverterai.com,https://api.pdfconverterai.com"
     model_path: str = "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/models"
 
