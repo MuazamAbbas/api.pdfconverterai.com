@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends
+from pydantic import HttpUrl
 import logging
 from app.core.security import verify_api_key
+from app.services.video.youtube_metadata import fetch_youtube_metadata
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -23,3 +25,24 @@ async def test_video():
 async def placeholder_video(api_key: dict = Depends(verify_api_key)):
     logger.debug("📹 Video processing placeholder accessed")
     return {"message": "Video processing tools coming soon"}
+
+@router.post("/youtube_metadata", summary="Fetch YouTube video metadata")
+async def youtube_metadata(url: HttpUrl, api_key: dict = Depends(verify_api_key)):
+    """
+    Fetch metadata (title, description, duration) from a YouTube video URL.
+    Args:
+        url: YouTube video URL.
+    Returns:
+        dict: Metadata including title, description, duration.
+    """
+    logger.debug("📹 Fetching YouTube metadata for URL: %s", url)
+    try:
+        metadata = await fetch_youtube_metadata(url)
+        logger.debug("✅ Metadata fetched: %s", metadata)
+        return metadata
+    except ValueError as e:
+        logger.error("Error fetching YouTube metadata: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Unexpected error in youtube_metadata: %s", str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

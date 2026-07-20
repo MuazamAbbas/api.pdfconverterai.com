@@ -1,0 +1,1 @@
+import yt_dlp; ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}); info = ydl.extract_info("https://www.youtube.com/watch?v=dQw4w9WgXcQ", download=False); print({"title": info.get("title"), "description": info.get("description")[:100], "duration": info.get("duration")})

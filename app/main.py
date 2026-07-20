@@ -28,26 +28,14 @@ app = FastAPI(
     description="API for PDFConverterAI.com tools and RapidAPI distribution",
     version="1.0",
     docs_url="/docs",
-    openapi_url="/ siano_url="/openapi.json"
+    openapi_url="/openapi.json"
 )
-
-# Middleware to log all requests and errors
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    logger.debug(f"📡 Request: {request.method} {request.url}")
-    try:
-        response = await call_next(request)
-        logger.debug(f"✅ Response: {response.status_code}")
-        return response
-    except Exception as e:
-        logger.exception(f"💥 Middleware error: {str(e)}")
-        raise
 
 # Preload essential Hugging Face models
 logger.info("🚀 Starting to preload essential Hugging Face models")
 try:
-    logger.debug("Loading paraphrase model: sentence-transformers/paraphrase-MiniLM-L6-v2")
-    app.state.paraphrase_pipeline = pipeline("text2text-generation", model="sentence-transformers/paraphrase-MiniLM-L6-v2", device="cpu")
+    logger.debug("Loading paraphrase model: t5-small")
+    app.state.paraphrase_pipeline = pipeline("text2text-generation", model="t5-small", device="cpu")
     logger.debug("✅ Paraphrase model loaded successfully")
 except Exception as e:
     logger.error("❌ Failed to load paraphrase_pipeline: %s", str(e))
