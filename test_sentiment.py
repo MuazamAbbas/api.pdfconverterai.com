@@ -1,0 +1,1 @@
+from textblob import TextBlob; text = "I love this product!"; blob = TextBlob(text); print({"text": text, "polarity": blob.sentiment.polarity, "subjectivity": blob.sentiment.subjectivity, "label": "positive" if blob.sentiment.polarity > 0 else "negative" if blob.sentiment.polarity < 0 else "neutral"})

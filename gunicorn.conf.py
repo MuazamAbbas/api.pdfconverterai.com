@@ -1,0 +1,9 @@
+workers = 2
+worker_class = "uvicorn.workers.UvicornWorker"
+bind = "0.0.0.0:8000"
+timeout = 180
+keepalive = 5
+loglevel = "debug"
+errorlog = "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/gunicorn_error.log"
+accesslog = "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/gunicorn_access.log"
+access_log_format = '%(h)s:%(p)s - "%(r)s" %(s)s'

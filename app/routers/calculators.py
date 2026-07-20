@@ -1,10 +1,18 @@
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
 import logging
 from app.core.security import verify_api_key
 from app.services.calculators.percentage import calculate_percentage
 from app.services.calculators.loan import calculate_loan
 from app.services.calculators.age import calculate_age
+from app.services.calculators.bmi import calculate_bmi
+from app.services.calculators.financial_plan import calculate_financial_plan
+from app.models.calculators import (
+    AgeCalculatorRequest,
+    PercentageCalculatorRequest,
+    LoanCalculatorRequest,
+    BMICalculatorRequest,
+    FinancialPlanRequest
+)
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -16,19 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/calculators", tags=["calculators"])
-
-class AgeCalculatorRequest(BaseModel):
-    birth_date: str  # Format: YYYY-MM-DD
-
-class PercentageCalculatorRequest(BaseModel):
-    value: float
-    percentage: float
-
-class LoanCalculatorRequest(BaseModel):
-    principal: float
-    annual_rate: float
-    years: int
+router = APIRouter(prefix="/calculators", tags=["Calculators"])
 
 @router.get("/test", summary="Test Calculators endpoint")
 async def test_calculators(api_key: dict = Depends(verify_api_key)):
@@ -76,3 +72,34 @@ async def calculate_loan_endpoint(request: LoanCalculatorRequest, api_key: dict 
     except Exception as e:
         logger.exception("💥 Error calculating loan: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error calculating loan: {str(e)}")
+
+@router.post("/bmi", summary="Calculate BMI")
+async def calculate_bmi_endpoint(request: BMICalculatorRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Calculating BMI: weight=%s, height=%s", request.weight_kg, request.height_m)
+    try:
+        result = calculate_bmi(request.weight_kg, request.height_m)
+        logger.debug("✅ BMI result: %s", result)
+        return {"weight_kg": request.weight_kg, "height_m": request.height_m, "bmi": result}
+    except ValueError as e:
+        logger.error("❌ Invalid input: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("💥 Error calculating BMI: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error calculating BMI: {str(e)}")
+
+@router.post("/financial_plan", summary="Calculate investment with sentiment adjustment")
+async def financial_plan(request: FinancialPlanRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Calculating financial plan: principal=%s, rate=%s, years=%s, sentiment=%s", 
+                 request.principal, request.rate, request.years, request.market_sentiment)
+    try:
+        result = await calculate_financial_plan(
+            request.principal, request.rate, request.years, request.market_sentiment
+        )
+        logger.debug("✅ Financial plan result: %s", result)
+        return result
+    except ValueError as e:
+        logger.error("❌ Invalid input: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("💥 Error calculating financial plan: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error calculating financial plan: {str(e)}")
