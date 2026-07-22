@@ -6,11 +6,12 @@ import PyPDF2
 import pymupdf  # MuPDF for better text extraction
 import logging
 from app.core.security import verify_api_key
+from app.core.config import settings
 from app.services.pdf.pdf_to_word import convert_pdf_to_word
 from app.services.pdf.summarize import summarize_pdf_service
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=settings.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
