@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def verify_api_key(x_api_key: str = Header(...), request: Request = None):
-    logger.debug("🧪 Verifying API key: %s", x_api_key)
+    logger.debug("🧪 Verifying API key")
     try:
         client = AsyncIOMotorClient(settings.database_url)
         db = client["pdfconverterai"]
@@ -58,7 +58,7 @@ async def verify_api_key(x_api_key: str = Header(...), request: Request = None):
             {"key": x_api_key},
             {"$inc": {"usage_count": 1}, "$set": {"last_used": datetime.utcnow()}}
         )
-        logger.debug("✅ Valid key found: %s", key_data)
+        logger.debug("✅ Valid key found: id=%s", key_data.get("_id"))
         client.close()
         return {"key_data": key_data}
     except HTTPException:
