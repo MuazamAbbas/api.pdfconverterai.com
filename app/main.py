@@ -7,7 +7,7 @@ from app.core.security import verify_api_key
 from app.routers import (
     ai_tools, seo_tools, web_tools, downloaders, unit_converters,
     binary_tools, calculators, cyber_security, miscellaneous,
-    pdf, text, image, video, categories, tools, debug
+    pdf, text, image, video, categories, tools
 )
 import logging
 from transformers import pipeline
@@ -112,7 +112,6 @@ app.include_router(image.router, prefix="/v1", tags=["Image Tools"], dependencie
 app.include_router(video.router, prefix="/v1", tags=["Video Tools"], dependencies=protected_dependency)
 app.include_router(categories.router, prefix="/v1", tags=["Categories"], dependencies=protected_dependency)
 app.include_router(tools.router, prefix="/v1", tags=["Tools"], dependencies=protected_dependency)
-app.include_router(debug.router, prefix="/v1", tags=["Debug"], dependencies=protected_dependency)
 
 @app.get("/", summary="Root endpoint")
 async def read_root():
