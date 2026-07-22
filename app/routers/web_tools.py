@@ -5,12 +5,13 @@ import re
 import aiohttp
 import logging
 from app.core.security import verify_api_key
+from app.core.config import settings
 from app.models.web_tools import URLEncodeRequest, WebpageSummarizeRequest
 from app.services.web_tools.summarize import Summarizer
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=settings.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),

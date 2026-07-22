@@ -4,6 +4,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from app.core.security import verify_api_key
+from app.core.config import settings
 from app.routers import (
     ai_tools, seo_tools, web_tools, downloaders, unit_converters,
     binary_tools, calculators, cyber_security, miscellaneous,
@@ -14,7 +15,7 @@ from transformers import pipeline
 
 # Logging setup
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=settings.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),

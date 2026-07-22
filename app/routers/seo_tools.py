@@ -2,11 +2,12 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import logging
 from app.core.security import verify_api_key
+from app.core.config import settings
 from app.services.seo.keyword_density import keyword_density
 from app.services.seo.keyword_extract import extract_keywords_service
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=settings.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),

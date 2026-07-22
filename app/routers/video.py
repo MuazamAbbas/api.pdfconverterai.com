@@ -2,10 +2,11 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import HttpUrl
 import logging
 from app.core.security import verify_api_key
+from app.core.config import settings
 from app.services.video.youtube_metadata import fetch_youtube_metadata
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=settings.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),

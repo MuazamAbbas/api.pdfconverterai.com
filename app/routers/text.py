@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, FastAPI
 from app.models.text import TextRequest, TextResponse, SentimentResponse, GrammarResponse
 from app.core.security import verify_api_key
+from app.core.config import settings
 from app.services.text.sentiment import SentimentAnalyzer
 from app.services.text.paraphrase import Paraphraser
 from app.services.text.summarize import Summarizer
@@ -10,7 +11,7 @@ import logging
 import json
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=settings.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),

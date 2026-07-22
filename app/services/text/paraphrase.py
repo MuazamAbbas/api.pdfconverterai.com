@@ -2,9 +2,10 @@ import logging
 from fastapi import FastAPI
 from transformers import pipeline
 from transformers import __version__ as transformers_version
+from app.core.config import settings
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=settings.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
