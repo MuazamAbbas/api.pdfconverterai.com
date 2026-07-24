@@ -1,14 +1,21 @@
 from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from arq.connections import RedisSettings, create_pool
 from app.core.security import verify_api_key
 from app.core.config import settings
+from app.core.database import ensure_indexes
+from app.core.storage import cleanup_expired_files
 from app.routers import (
     ai_tools, seo_tools, web_tools, downloaders, unit_converters,
     binary_tools, calculators, cyber_security, miscellaneous,
-    pdf, text, image, video, categories, tools
+    pdf, text, image, video, categories, tools, files, jobs
 )
 import logging
 from transformers import pipeline
@@ -113,6 +120,45 @@ app.include_router(image.router, prefix="/v1", tags=["Image Tools"], dependencie
 app.include_router(video.router, prefix="/v1", tags=["Video Tools"], dependencies=protected_dependency)
 app.include_router(categories.router, prefix="/v1", tags=["Categories"], dependencies=protected_dependency)
 app.include_router(tools.router, prefix="/v1", tags=["Tools"], dependencies=protected_dependency)
+app.include_router(files.router, prefix="/v1", tags=["Files"], dependencies=protected_dependency)
+app.include_router(jobs.router, prefix="/v1", tags=["Jobs"], dependencies=protected_dependency)
+
+# Standard response envelope (Handbook Part C.5, ADR-004): every error
+# response - old routes raising a plain-string HTTPException or new ones
+# raising `app.shared.responses.api_error(...)` - comes back as
+# {success: false, message, error: {code}}. Never leaks a stack trace
+# (Part C.10).
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    detail = exc.detail
+    if isinstance(detail, dict) and "success" in detail:
+        return JSONResponse(status_code=exc.status_code, content=detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "message": str(detail), "error": {"code": "HTTP_ERROR"}},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # A structurally missing/malformed required field (e.g. no `X-API-Key`
+    # header at all) hits this handler instead of StarletteHTTPException -
+    # without it, callers got FastAPI's stock {"detail": [...]} shape here
+    # while an *invalid* API key value correctly got the standard envelope.
+    logger.warning("Request validation failed on %s: %s", request.url.path, exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={"success": False, "message": "Invalid request", "error": {"code": "VALIDATION_ERROR"}},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception on %s: %s", request.url.path, str(exc))
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "message": "Internal server error", "error": {"code": "INTERNAL_ERROR"}},
+    )
 
 @app.get("/", summary="Root endpoint")
 async def read_root():
@@ -131,9 +177,27 @@ async def ping(request: Request):
     logger.debug("🏓 Accessing ping endpoint")
     return {"message": "pong"}
 
+scheduler = AsyncIOScheduler()
+
+
 @app.on_event("startup")
 async def startup_event():
     logger.info("🚀 Starting PDFConverterAI API")
+    await ensure_indexes()
+
+    # ARQ job queue (Handbook Part C.2, ADR-006): one shared connection pool
+    # for the process, used by pdf/convert|to_word|summarize to enqueue jobs
+    # for app/worker.py to pick up.
+    app.state.arq_redis = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    logger.debug("✅ ARQ redis pool connected")
+
+    # Files/jobs retention sweep (Handbook Part C.1): the TTL index on
+    # files.expiresAt only expires the Mongo record, not the bytes on disk -
+    # this periodically deletes both, extending the pre-existing
+    # APScheduler cleanup pattern instead of introducing a new one.
+    scheduler.add_job(cleanup_expired_files, "interval", minutes=5, id="cleanup_expired_files")
+    scheduler.start()
+
     logger.debug("✅ Startup event completed")
 
 @app.on_event("shutdown")
@@ -146,6 +210,10 @@ async def shutdown_event():
         if hasattr(app.state, "paraphrase_pipeline"):
             logger.debug("🧹 Cleaning up paraphrase_pipeline")
             del app.state.paraphrase_pipeline
+        if hasattr(app.state, "arq_redis"):
+            logger.debug("🧹 Closing ARQ redis pool")
+            await app.state.arq_redis.close()
+        scheduler.shutdown(wait=False)
         logger.debug("✅ Shutdown event completed")
     except Exception as e:
         logger.error("❌ Error during shutdown: %s", str(e))
