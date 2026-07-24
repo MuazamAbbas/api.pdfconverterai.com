@@ -9,6 +9,7 @@ readme = "README.md"
 python = "^3.12"
 annotated-types = "^0.7.0"
 anyio = "^4.9.0"
+arq = "^0.28.0"
 bcrypt = "^4.3.0"
 beautifulsoup4 = "^4.13.4"
 certifi = "^2022.12.7"
@@ -85,6 +86,24 @@ rich = "^14.0.0"
 markdown-it-py = "^3.0.0"
 mdurl = "^0.1.2"
 pygments = "^2.19.1"
+
+[tool.poetry.group.dev.dependencies]
+# Test scaffolding for the files/jobs/pdf lifecycle work (Handbook Part D.1/C.7).
+# Not previously present - this backend had no automated test suite at all.
+pytest = "^8.4.2"
+pytest-asyncio = "^0.24.0"
+httpx = "^0.27.2"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Motor's AsyncIOMotorClient (app.core.database.db) is created once at
+# import time and binds to whichever event loop first uses it; pytest-asyncio's
+# default is a fresh event loop per test function, which breaks Motor on the
+# second test ("Event loop is closed"). Pin one event loop for the whole
+# session instead, since `db` is a shared, process-lifetime singleton exactly
+# like it is in the real running app.
+asyncio_default_fixture_loop_scope = "session"
+testpaths = ["tests"]
 
 [[tool.poetry.source]]
 name = "pytorch"

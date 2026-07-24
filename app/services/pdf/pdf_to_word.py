@@ -1,37 +1,34 @@
 import logging
 import os
-import shutil
+
 from pdf2docx import Converter
-from fastapi import UploadFile, HTTPException
 
 logger = logging.getLogger(__name__)
 
-async def convert_pdf_to_word(pdf_file: UploadFile) -> str:
-    """Convert PDF to Word and return file path."""
-    if not pdf_file.filename.endswith(".pdf"):
-        logger.error("❌ Invalid file type: %s", pdf_file.filename)
-        raise HTTPException(status_code=400, detail="File must be a PDF")
-    os.makedirs("/tmp/pdfconverterai", exist_ok=True)
-    temp_pdf_path = f"/tmp/pdfconverterai/{pdf_file.filename}"
-    output_path = f"/tmp/pdfconverterai/{pdf_file.filename}.docx"
+
+async def convert_pdf_to_word(pdf_path: str, output_dir: str) -> str:
+    """Convert a PDF already on disk to a .docx file in `output_dir`.
+
+    Returns the output path. Callers (the `pdf_to_word` Tier 2 job,
+    `app/services/pdf/processors.py`) are responsible for turning exceptions
+    into the ADR-003 retry classification - a `ValueError` here means the
+    input itself is bad (permanent, no retry); anything else is treated as
+    a transient conversion failure by the caller.
+
+    Note: this used to accept a FastAPI `UploadFile` and save it to disk
+    itself; it now takes a path because the file is already on disk and
+    tracked in Mongo (`files` collection) by the time a job runs it -
+    see Handbook Part C.4/C.9 and the files/jobs lifecycle this pairs with.
+    """
+    if not os.path.exists(pdf_path):
+        raise ValueError("Source PDF not found")
+
+    base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    output_path = os.path.join(output_dir, f"{base_name}-{os.getpid()}.docx")
+    cv = Converter(pdf_path)
     try:
-        # Save uploaded file
-        with open(temp_pdf_path, "wb") as buffer:
-            shutil.copyfileobj(pdf_file.file, buffer)
-        logger.debug("✅ PDF saved to: %s", temp_pdf_path)
-        # Convert to Word
-        cv = Converter(temp_pdf_path)
         cv.convert(output_path)
-        cv.close()
-        logger.debug("✅ Converted PDF to Word: %s", output_path)
-        return output_path
-    except Exception as e:
-        logger.exception("💥 Error converting PDF to Word: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting PDF to Word: {str(e)}")
     finally:
-        if os.path.exists(temp_pdf_path):
-            try:
-                os.remove(temp_pdf_path)
-                logger.debug("🗑️ Removed temporary file: %s", temp_pdf_path)
-            except Exception as e:
-                logger.error("❌ Failed to remove temporary file %s: %s", temp_pdf_path, str(e))
+        cv.close()
+    logger.debug("Converted PDF to Word: %s", output_path)
+    return output_path
