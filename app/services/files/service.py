@@ -37,11 +37,20 @@ _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # check) so other modules can pass/extend their own allow-list later.
 DEFAULT_ALLOWED_EXTENSIONS: set[str] = {".pdf"}
 
+# `image` module's own allow-list (Handbook Part C.3: `image` is a separate
+# module from `pdf`, so it gets its own extension set rather than widening
+# DEFAULT_ALLOWED_EXTENSIONS - `app/routers/image.py`'s `/image/upload`
+# passes this in via `save_uploaded_file`'s `allowed_extensions` param).
+IMAGE_ALLOWED_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png"}
+
 # Known file signatures ("magic bytes") for extensions in
-# DEFAULT_ALLOWED_EXTENSIONS - verifies actual file content, not just the
-# filename/extension, matches what it claims to be.
+# DEFAULT_ALLOWED_EXTENSIONS/IMAGE_ALLOWED_EXTENSIONS - verifies actual file
+# content, not just the filename/extension, matches what it claims to be.
 _MAGIC_BYTES: dict[str, bytes] = {
     ".pdf": b"%PDF-",
+    ".jpg": b"\xff\xd8\xff",
+    ".jpeg": b"\xff\xd8\xff",
+    ".png": b"\x89PNG\r\n\x1a\n",
 }
 
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB

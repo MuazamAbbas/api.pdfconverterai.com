@@ -1,5 +1,5 @@
-"""ARQ worker process entrypoint for Tier 2 PDF jobs (Handbook Part C.2/C.4/
-C.7, ADR-003 Processing Engine, ADR-006 ARQ). Run with:
+"""ARQ worker process entrypoint for Tier 2 PDF/Image jobs (Handbook Part
+C.2/C.4/C.7, ADR-003 Processing Engine, ADR-006 ARQ). Run with:
 
     arq app.worker.WorkerSettings
 
@@ -119,8 +119,17 @@ async def pdf_summarize(ctx, job_id: str) -> None:
     await _run_job(ctx, job_id, PdfSummarizeProcessor, build_result)
 
 
+async def image_ocr(ctx, job_id: str) -> None:
+    from app.services.image.processors import ImageOcrProcessor
+
+    async def build_result(job, file_doc, raw_result):
+        return raw_result  # {"text": "..."}
+
+    await _run_job(ctx, job_id, ImageOcrProcessor, build_result)
+
+
 class WorkerSettings:
-    functions = [pdf_convert, pdf_to_word, pdf_summarize]
+    functions = [pdf_convert, pdf_to_word, pdf_summarize, image_ocr]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_tries = MAX_TRIES
     job_timeout = 300
