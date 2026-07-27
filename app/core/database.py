@@ -1,12 +1,28 @@
 import logging
+from urllib.parse import urlsplit, urlunsplit
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.core.config import settings
 
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
+
+def _mask_connection_string(url: str) -> str:
+    """Redact the password from a Mongo connection string before logging it.
+    Unlike API keys (last-4 convention), a DB credential gets fully masked -
+    there's no legitimate debugging value in a partial password."""
+    try:
+        parts = urlsplit(url)
+        netloc = parts.netloc
+        if parts.password:
+            netloc = netloc.replace(f":{parts.password}@", ":***@")
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except Exception:
+        return "<unparseable>"
+
+
 try:
-    logger.debug(f"Connecting to MongoDB with URL: {settings.database_url}")
+    logger.debug("Connecting to MongoDB with URL: %s", _mask_connection_string(settings.database_url))
     client = AsyncIOMotorClient(settings.database_url)
     db = client["pdfconverterai"]
 except Exception as e:
