@@ -16,20 +16,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _mask_key(key: str) -> str:
+    """Last 4 chars only, per SPRINT_STATUS.md logging convention - never log
+    a caller-supplied API key in full, even at WARNING/ERROR level."""
+    if not key or len(key) <= 4:
+        return "****"
+    return f"****{key[-4:]}"
+
+
 async def verify_api_key(x_api_key: str = Header(...), request: Request = None):
     logger.debug("🧪 Verifying API key")
     try:
         client = AsyncIOMotorClient(settings.database_url)
         db = client["pdfconverterai"]
         key_data = await db.api_keys.find_one({"key": x_api_key, "status": "active"})
-        
+
         if not key_data:
-            logger.warning("❌ No active key found for: %s", x_api_key)
+            logger.warning("❌ No active key found for: %s", _mask_key(x_api_key))
             raise HTTPException(status_code=403, detail="Invalid API Key")
-        
+
         # Check rate limit
         if key_data["usage_count"] >= key_data["rate_limit_per_day"]:
-            logger.warning("🚫 Rate limit exceeded for key: %s", x_api_key)
+            logger.warning("🚫 Rate limit exceeded for key: %s", _mask_key(x_api_key))
             raise HTTPException(status_code=429, detail="Daily API rate limit exceeded")
         
         # Extract category from request path
@@ -65,5 +74,5 @@ async def verify_api_key(x_api_key: str = Header(...), request: Request = None):
         logger.debug("🔍 HTTPException raised, passing through")
         raise
     except Exception as e:
-        logger.exception("💥 Error verifying API key %s: %s", x_api_key, str(e))
+        logger.exception("💥 Error verifying API key %s: %s", _mask_key(x_api_key), str(e))
         raise HTTPException(status_code=500, detail="Internal server error")
