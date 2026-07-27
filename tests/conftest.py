@@ -39,19 +39,22 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.config import settings
 from app.core.database import db
 from app.routers import files as files_router
+from app.routers import image as image_router
 from app.routers import jobs as jobs_router
 from app.routers import pdf as pdf_router
 
 
 def build_test_app() -> FastAPI:
     """Mirrors the router mounting + exception handlers from `app/main.py`
-    for just the three routers this task touched, without any of the
-    startup-time model preloading / unrelated routers that make the real
+    for just the routers this task touched (`files`, `jobs`, `pdf`, and now
+    `image` for the OCR-via-Job-System reconciliation work), without any of
+    the startup-time model preloading / unrelated routers that make the real
     `app.main` unimportable in this environment."""
     app = FastAPI()
     app.include_router(files_router.router, prefix="/v1")
     app.include_router(jobs_router.router, prefix="/v1")
     app.include_router(pdf_router.router, prefix="/v1")
+    app.include_router(image_router.router, prefix="/v1")
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
@@ -170,3 +173,44 @@ def corrupt_pdf_bytes() -> bytes:
     `app.services.pdf.convert.extract_text_from_pdf` fail to parse it -
     exercises the ADR-003 permanent-failure/no-retry path."""
     return b"%PDF-1.4\nthis is not a real pdf structure, just garbage bytes\n%%EOF"
+
+
+@pytest.fixture
+def image_with_text_bytes() -> bytes:
+    """A small PNG with real, OCR-extractable text, drawn with Pillow rather
+    than a static binary fixture checked into the repo - mirrors
+    `test_pdf_bytes`'s role, but for the `image` module's OCR round trip.
+    Large font/high-contrast/generous padding so Tesseract's default engine
+    has a realistic shot at it (wherever a real `tesseract` binary is
+    actually available - see `tests/test_files_jobs_image_flow.py`'s
+    `_tesseract_available` skip guard)."""
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (600, 150), color="white")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.load_default(size=48)
+    except TypeError:
+        # Older Pillow without load_default(size=...) support.
+        font = ImageFont.load_default()
+    draw.text((20, 40), "HELLO WORLD", fill="black", font=font)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.fixture
+def blank_image_bytes() -> bytes:
+    """A uniform-color PNG with no text at all - drives the "no text could
+    be extracted" permanent-failure path (`extract_text_from_image`'s own
+    `ValueError`, surfaced through `ImageOcrProcessor.execute`/`verify`)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.new("RGB", (100, 100), color="white")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
