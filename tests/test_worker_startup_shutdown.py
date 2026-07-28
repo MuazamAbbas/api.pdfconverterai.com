@@ -60,27 +60,41 @@ def test_worker_settings_wires_on_startup_and_on_shutdown_hooks():
         worker.pdf_to_word,
         worker.pdf_summarize,
         worker.image_ocr,
+        worker.text_paraphrase,
+        worker.text_summarize,
+        worker.web_tools_summarize,
     ]
     assert worker.WorkerSettings.max_tries == worker.MAX_TRIES
 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_on_startup_loads_pipeline_once_and_stores_it_on_ctx(monkeypatch):
+    """`on_startup` now preloads three pipelines per worker process (not
+    just `bart-large-cnn`): the t5-small `paraphrase_pipeline`/
+    `summarize_pipeline` moved here from `app/main.py`'s `startup_event()`
+    once `text_paraphrase`/`text_summarize`/`web_tools_summarize` became
+    Tier 2 jobs (ADR-015 Open Item 2)."""
     calls = []
 
     def _fake_pipeline(task, model, device="cpu"):
         calls.append({"task": task, "model": model, "device": device})
-        return SimpleNamespace(model="fake-bart-large-cnn-model")
+        return SimpleNamespace(model=f"fake-{model}-model")
 
     _install_fake_transformers_module(monkeypatch, _fake_pipeline)
 
     ctx: dict = {}
     await worker.on_startup(ctx)
 
-    assert len(calls) == 1, "on_startup must load the pipeline exactly once per call"
+    assert len(calls) == 3, "on_startup must load each of its three pipelines exactly once per call"
     assert calls[0] == {"task": "summarization", "model": "facebook/bart-large-cnn", "device": "cpu"}
+    assert calls[1] == {"task": "text2text-generation", "model": "t5-small", "device": "cpu"}
+    assert calls[2] == {"task": "summarization", "model": "t5-small", "device": "cpu"}
     assert "summarizer_pipeline" in ctx
-    assert ctx["summarizer_pipeline"].model == "fake-bart-large-cnn-model"
+    assert ctx["summarizer_pipeline"].model == "fake-facebook/bart-large-cnn-model"
+    assert "paraphrase_pipeline" in ctx
+    assert ctx["paraphrase_pipeline"].model == "fake-t5-small-model"
+    assert "summarize_pipeline" in ctx
+    assert ctx["summarize_pipeline"].model == "fake-t5-small-model"
 
 
 @pytest.mark.asyncio(loop_scope="session")
