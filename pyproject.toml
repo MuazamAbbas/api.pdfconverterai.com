@@ -89,6 +89,7 @@ rich = "^14.0.0"
 markdown-it-py = "^3.0.0"
 mdurl = "^0.1.2"
 pygments = "^2.19.1"
+rake-nltk = "^1.0.6"
 
 [tool.poetry.group.dev.dependencies]
 # Test scaffolding for the files/jobs/pdf lifecycle work (Handbook Part D.1/C.7).
