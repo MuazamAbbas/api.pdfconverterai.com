@@ -169,13 +169,15 @@ async def startup_event():
     # Preload essential Hugging Face models (moved here from module scope so
     # loading happens inside the startup hook, after `app` is fully
     # configured, instead of before - ADR-015 Open Item 2).
+    #
+    # `paraphrase_pipeline`/`summarize_pipeline` no longer load here: now
+    # that `POST /text/paraphrase`, `POST /text/summarize`, and
+    # `POST /web_tools/summarize` are Tier 2 jobs (Handbook Part I.2) run
+    # from the ARQ worker process instead of this FastAPI request process,
+    # those two t5-small pipelines are loaded once per worker process in
+    # `app/worker.py`'s `on_startup()` instead, via `ctx["paraphrase_pipeline"]`/
+    # `ctx["summarize_pipeline"]`.
     logger.info("🚀 Starting to preload essential Hugging Face models")
-    app.state.paraphrase_pipeline = _load_pipeline(
-        "paraphrase_pipeline", "text2text-generation", "t5-small"
-    )
-    app.state.summarize_pipeline = _load_pipeline(
-        "summarize_pipeline", "summarization", "t5-small"
-    )
     app.state.financial_sentiment_pipeline = _load_pipeline(
         "financial_sentiment_pipeline",
         "sentiment-analysis",
@@ -202,12 +204,6 @@ async def startup_event():
 async def shutdown_event():
     logger.info("🛑 Shutting down PDFConverterAI API")
     try:
-        if hasattr(app.state, "summarize_pipeline"):
-            logger.debug("🧹 Cleaning up summarize_pipeline")
-            del app.state.summarize_pipeline
-        if hasattr(app.state, "paraphrase_pipeline"):
-            logger.debug("🧹 Cleaning up paraphrase_pipeline")
-            del app.state.paraphrase_pipeline
         if hasattr(app.state, "financial_sentiment_pipeline"):
             logger.debug("🧹 Cleaning up financial_sentiment_pipeline")
             del app.state.financial_sentiment_pipeline

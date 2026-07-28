@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends, FastAPI
+from bson import ObjectId
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 import urllib.parse
 import re
@@ -6,8 +7,10 @@ import aiohttp
 import logging
 from app.core.security import verify_api_key
 from app.core.config import settings
-from app.models.web_tools import URLEncodeRequest, WebpageSummarizeRequest
-from app.services.web_tools.summarize import Summarizer
+from app.models.web_tools import URLEncodeRequest
+from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
+from app.services.jobs.service import create_job, mark_failed, mark_queued
+from app.shared.responses import api_error, envelope
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logging.basicConfig(
@@ -22,12 +25,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/web_tools", tags=["Web Tools"])
 
-def get_app() -> FastAPI:
-    from app.main import app
-    return app
 
 class URLRequest(BaseModel):
     url: str
+
+
+class URLUploadRequest(BaseModel):
+    url: str
+
+
+class FileIdRequest(BaseModel):
+    file_id: str
+
 
 @router.get("/test", summary="Test Web Tools endpoint")
 async def test_web_tools(api_key: dict = Depends(verify_api_key)):
@@ -45,20 +54,63 @@ async def url_encode(request: URLEncodeRequest, api_key: dict = Depends(verify_a
         logger.exception("💥 Error encoding URL: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error encoding URL: {str(e)}")
 
-@router.post("/summarize", summary="Summarize webpage content")
-async def webpage_summarize(request: WebpageSummarizeRequest, app: FastAPI = Depends(get_app), _ = Depends(verify_api_key)):
-    logger.debug("📝 Summarizing webpage: %s", request.url)
+@router.post("/upload", summary="Upload a URL for webpage summarization jobs")
+async def upload_web_tools(payload: URLUploadRequest, api_key: dict = Depends(verify_api_key)):
+    """Tier 1 - writes `url` to disk and registers a `files` record for it,
+    the same way `app/routers/pdf.py`'s `upload_pdf` does for a real upload,
+    so `POST /web_tools/summarize` can reference it by `file_id` (Handbook
+    Part C.3/C.5). Uses the standard `envelope`/`api_error` response style
+    (not this file's other, older raw-dict endpoints) since this is a new
+    Job-System endpoint, consistent with `pdf`/`image`'s Tier 2 endpoints.
+    """
+    if not payload.url.startswith(("http://", "https://")):
+        logger.warning("URL upload rejected, missing http(s):// prefix: %s", payload.url)
+        raise api_error(400, "URL must start with http:// or https://", "URL_INVALID")
+
     try:
-        summarizer = Summarizer(app)
-        summary = await summarizer.summarize_webpage(request.url)
-        logger.debug("✅ Summary generated for: %s", request.url)
-        return {"url": request.url, "summary": summary}
-    except ValueError as e:
-        logger.error("❌ Validation error: %s", str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        owner_id = ObjectId(api_key["key_data"]["_id"])
+        file_doc = await save_text_input(payload.url, owner_id, "url_input.txt")
+    except UploadValidationError as e:
+        logger.warning("URL upload rejected: %s", e.message)
+        raise api_error(e.status_code, e.message, e.error_code)
     except Exception as e:
-        logger.exception("💥 Error summarizing webpage: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error summarizing webpage: {str(e)}")
+        logger.exception("URL upload failed: %s", str(e))
+        raise api_error(500, "Failed to upload URL", "UPLOAD_FAILED")
+
+    logger.info("URL uploaded: id=%s", file_doc.id)
+    return envelope(True, "URL uploaded", data={"file_id": str(file_doc.id), "filename": file_doc.originalFilename})
+
+
+async def _create_web_tools_job(request: Request, file_id: str, job_type: str, api_key: dict) -> dict:
+    """Mirrors `app/routers/pdf.py`'s `_create_pdf_job` / `app/routers/image.py`'s
+    `_create_image_job` (Handbook Part C.4): ownership check, create the Job,
+    enqueue the matching ARQ task, transition Pending -> Queued.
+    """
+    file_doc = await get_file_by_id(file_id)
+    if file_doc is None:
+        raise api_error(404, "File not found or has expired", "FILE_NOT_FOUND")
+
+    owner_id = str(api_key["key_data"]["_id"])
+    if str(file_doc.ownerApiKeyId) != owner_id:
+        raise api_error(403, "Not authorized to use this file", "FILE_FORBIDDEN")
+
+    job = await create_job(file_doc.id, job_type)
+    try:
+        await request.app.state.arq_redis.enqueue_job(job_type, str(job.id), _job_id=str(job.id))
+        await mark_queued(str(job.id))
+    except Exception as e:
+        logger.exception("Failed to enqueue job %s (%s): %s", job.id, job_type, str(e))
+        await mark_failed(str(job.id), "Failed to queue job for processing")
+        raise api_error(503, "Job queue is temporarily unavailable", "QUEUE_UNAVAILABLE")
+
+    logger.info("Created job %s (%s) for file %s", job.id, job_type, file_id)
+    return {"job_id": str(job.id), "status": "queued"}
+
+
+@router.post("/summarize", summary="Summarize webpage content (async job)")
+async def webpage_summarize(payload: FileIdRequest, request: Request, api_key: dict = Depends(verify_api_key)):
+    data = await _create_web_tools_job(request, payload.file_id, "web_tools_summarize", api_key)
+    return envelope(True, "Summarization job created", data=data)
 
 @retry(
     stop=stop_after_attempt(3),
