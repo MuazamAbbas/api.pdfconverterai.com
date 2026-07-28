@@ -13,6 +13,11 @@ respective `execute()` methods rather than at module scope, so importing
 this module (or running a `pdf_convert` job) never pulls in pdf2docx or
 transformers/torch unless a `pdf_to_word`/`pdf_summarize` job actually
 runs - see `app/worker.py`'s module docstring for why that matters.
+
+`PdfSummarizeProcessor` no longer loads its own model: the `bart-large-cnn`
+pipeline is loaded once per worker process in `app/worker.py`'s
+`on_startup` hook and passed down through `Processor.run(job, file_doc,
+ctx)` -> `execute(job, file_doc, prepared, ctx)` as `ctx["summarizer_pipeline"]`.
 """
 import logging
 import os
@@ -40,7 +45,7 @@ class PdfConvertProcessor(Processor):
     async def prepare(self, job, file_doc):
         return {"path": file_doc.storagePath}
 
-    async def execute(self, job, file_doc, prepared):
+    async def execute(self, job, file_doc, prepared, ctx=None):
         try:
             text = await extract_text_from_pdf(prepared["path"])
         except ValueError as e:
@@ -64,7 +69,7 @@ class PdfToWordProcessor(Processor):
         os.makedirs(STORAGE_PATH, exist_ok=True)
         return {"path": file_doc.storagePath, "output_dir": STORAGE_PATH}
 
-    async def execute(self, job, file_doc, prepared):
+    async def execute(self, job, file_doc, prepared, ctx=None):
         from app.services.pdf.pdf_to_word import convert_pdf_to_word
 
         try:
@@ -90,11 +95,16 @@ class PdfSummarizeProcessor(Processor):
     async def prepare(self, job, file_doc):
         return {"path": file_doc.storagePath}
 
-    async def execute(self, job, file_doc, prepared):
+    async def execute(self, job, file_doc, prepared, ctx=None):
         from app.services.pdf.summarize import summarize_pdf_service
 
+        summarizer = (ctx or {}).get("summarizer_pipeline")
+        if summarizer is None:
+            # Worker process hasn't finished on_startup yet, or ctx wasn't
+            # threaded through - a temporary condition, safe to retry.
+            raise TransientProcessingError("Summarization model is not loaded yet")
         try:
-            summary = await summarize_pdf_service(prepared["path"])
+            summary = await summarize_pdf_service(prepared["path"], summarizer)
         except ValueError as e:
             raise PermanentProcessingError(str(e)) from e
         except Exception as e:

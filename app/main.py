@@ -39,45 +39,26 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
-# Preload essential Hugging Face models
-logger.info("🚀 Starting to preload essential Hugging Face models")
-try:
-    logger.debug("Loading paraphrase model: t5-small")
-    app.state.paraphrase_pipeline = pipeline("text2text-generation", model="t5-small", device="cpu")
-    logger.debug("✅ Paraphrase model loaded successfully")
-except Exception as e:
-    logger.error("❌ Failed to load paraphrase_pipeline: %s", str(e))
-    raise
 
-try:
-    logger.debug("Loading summarization model: t5-small")
-    app.state.summarize_pipeline = pipeline("summarization", model="t5-small", device="cpu")
-    logger.debug("✅ Summarization model loaded successfully")
-except Exception as e:
-    logger.error("❌ Failed to load summarize_pipeline: %s", str(e))
-    raise
-logger.info("✅ Essential models preloaded successfully")
+def _load_pipeline(state_attr: str, task: str, model: str, device: str = "cpu"):
+    """Load and verify one Hugging Face pipeline for `app.state` (Handbook
+    Part D.1 - avoid copy-pasted load/verify blocks per model). Called once
+    per model from `startup_event()` below, not at module scope, so it runs
+    inside FastAPI's own startup hook rather than before `app` is fully
+    configured.
+    """
+    logger.debug("Loading %s: %s", state_attr, model)
+    try:
+        pl = pipeline(task, model=model, device=device)
+    except Exception as e:
+        logger.error("❌ Failed to load %s: %s", state_attr, str(e))
+        raise
+    if not hasattr(pl, "model"):
+        logger.error("❌ %s is invalid or not initialized", state_attr)
+        raise ValueError(f"Invalid {state_attr}")
+    logger.debug("✅ %s loaded and verified", state_attr)
+    return pl
 
-# Verify pipeline state
-try:
-    logger.debug("Verifying paraphrase_pipeline state")
-    if not hasattr(app.state.paraphrase_pipeline, "model"):
-        logger.error("❌ paraphrase_pipeline is invalid or not initialized")
-        raise ValueError("Invalid paraphrase_pipeline")
-    logger.debug("✅ paraphrase_pipeline state verified")
-except Exception as e:
-    logger.error("❌ paraphrase_pipeline verification failed: %s", str(e))
-    raise
-
-try:
-    logger.debug("Verifying summarize_pipeline state")
-    if not hasattr(app.state.summarize_pipeline, "model"):
-        logger.error("❌ summarize_pipeline is invalid or not initialized")
-        raise ValueError("Invalid summarize_pipeline")
-    logger.debug("✅ summarize_pipeline state verified")
-except Exception as e:
-    logger.error("❌ summarize_pipeline verification failed: %s", str(e))
-    raise
 
 # Add CORS middleware for RapidAPI
 app.add_middleware(
@@ -185,6 +166,23 @@ async def startup_event():
     logger.info("🚀 Starting PDFConverterAI API")
     await ensure_indexes()
 
+    # Preload essential Hugging Face models (moved here from module scope so
+    # loading happens inside the startup hook, after `app` is fully
+    # configured, instead of before - ADR-015 Open Item 2).
+    logger.info("🚀 Starting to preload essential Hugging Face models")
+    app.state.paraphrase_pipeline = _load_pipeline(
+        "paraphrase_pipeline", "text2text-generation", "t5-small"
+    )
+    app.state.summarize_pipeline = _load_pipeline(
+        "summarize_pipeline", "summarization", "t5-small"
+    )
+    app.state.financial_sentiment_pipeline = _load_pipeline(
+        "financial_sentiment_pipeline",
+        "sentiment-analysis",
+        "distilbert-base-uncased-finetuned-sst-2-english",
+    )
+    logger.info("✅ Essential models preloaded successfully")
+
     # ARQ job queue (Handbook Part C.2, ADR-006): one shared connection pool
     # for the process, used by pdf/convert|to_word|summarize to enqueue jobs
     # for app/worker.py to pick up.
@@ -210,6 +208,9 @@ async def shutdown_event():
         if hasattr(app.state, "paraphrase_pipeline"):
             logger.debug("🧹 Cleaning up paraphrase_pipeline")
             del app.state.paraphrase_pipeline
+        if hasattr(app.state, "financial_sentiment_pipeline"):
+            logger.debug("🧹 Cleaning up financial_sentiment_pipeline")
+            del app.state.financial_sentiment_pipeline
         if hasattr(app.state, "arq_redis"):
             logger.debug("🧹 Closing ARQ redis pool")
             await app.state.arq_redis.close()

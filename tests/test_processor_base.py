@@ -2,6 +2,16 @@
 Validate/Prepare/Execute/Verify/Cleanup orchestrator every Tier 2 job task
 function calls (Handbook Part C.4, ADR-003). Pure unit tests: no Mongo/Redis,
 a recording fake Processor subclass only.
+
+Also covers `run()`/`execute()`'s optional `ctx` parameter (ADR-015 Open Item
+2, added so `app/worker.py` can hand each processor the ARQ worker-process
+context dict, e.g. `ctx["summarizer_pipeline"]` for `PdfSummarizeProcessor`) -
+`RecordingProcessor.execute()` below declares `ctx=None` in its signature to
+match the convention every real `Processor` subclass now follows
+(`app/services/pdf/processors.py`, `app/services/image/processors.py`); a
+subclass that omits it breaks with `TypeError: execute() takes N positional
+arguments but N+1 were given`, since `Processor.run()` always calls
+`self.execute(job, file_doc, prepared, ctx)` positionally, ctx or not.
 """
 import pytest
 
@@ -22,6 +32,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 class RecordingProcessor(Processor):
     def __init__(self, execute_result=None, execute_exc=None):
         self.calls: list[str] = []
+        self.last_ctx = None
         self._execute_result = execute_result
         self._execute_exc = execute_exc
 
@@ -32,8 +43,9 @@ class RecordingProcessor(Processor):
         self.calls.append("prepare")
         return {"staged": True}
 
-    async def execute(self, job, file_doc, prepared):
+    async def execute(self, job, file_doc, prepared, ctx=None):
         self.calls.append("execute")
+        self.last_ctx = ctx
         assert prepared == {"staged": True}
         if self._execute_exc:
             raise self._execute_exc
@@ -63,6 +75,27 @@ async def test_run_calls_all_steps_in_order_on_success():
     result = await p.run(job=object(), file_doc=object())
     assert result == {"ok": True}
     assert p.calls == ["validate", "prepare", "execute", "verify", "cleanup"]
+
+
+async def test_run_defaults_ctx_to_none_when_not_passed():
+    """`Processor.run()`'s `ctx` parameter (ADR-015 Open Item 2) is optional -
+    callers that don't pass one (e.g. any caller outside `app/worker.py`)
+    must still work, with `execute()` receiving `ctx=None`."""
+    p = RecordingProcessor(execute_result={"ok": True})
+    await p.run(job=object(), file_doc=object())
+    assert p.last_ctx is None
+
+
+async def test_run_threads_ctx_through_to_execute():
+    """`app/worker.py`'s `_run_job` calls `processor.run(job, file_doc, ctx)`
+    with the real ARQ worker-process ctx dict - `run()` must pass it through
+    to `execute()` unchanged (positionally, as its 4th argument) so
+    processors like `PdfSummarizeProcessor` can reach
+    `ctx["summarizer_pipeline"]`."""
+    p = RecordingProcessor(execute_result={"ok": True})
+    sentinel_ctx = {"summarizer_pipeline": object()}
+    await p.run(job=object(), file_doc=object(), ctx=sentinel_ctx)
+    assert p.last_ctx is sentinel_ctx
 
 
 async def test_run_cleanup_runs_when_execute_raises_permanent_error():
