@@ -1,15 +1,19 @@
-from transformers import pipeline
 import pymupdf
 import logging
 
 logger = logging.getLogger(__name__)
-summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
-async def summarize_pdf_service(file_path: str) -> str:
+
+async def summarize_pdf_service(file_path: str, summarizer) -> str:
     """
     Summarize text extracted from a PDF file.
     Args:
         file_path (str): Path to the PDF file.
+        summarizer: Preloaded Hugging Face summarization pipeline
+            (`facebook/bart-large-cnn`), loaded once per worker process in
+            `app/worker.py`'s `on_startup` hook and passed in via
+            `ctx["summarizer_pipeline"]` (Handbook Part C.2/C.4, ADR-003/
+            ADR-006) - this module no longer loads its own model.
     Returns:
         str: Summarized text.
     Raises:

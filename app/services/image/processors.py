@@ -37,7 +37,7 @@ class ImageOcrProcessor(Processor):
     async def prepare(self, job, file_doc):
         return {"path": file_doc.storagePath}
 
-    async def execute(self, job, file_doc, prepared):
+    async def execute(self, job, file_doc, prepared, ctx=None):
         try:
             with open(prepared["path"], "rb") as f:
                 image_data = f.read()

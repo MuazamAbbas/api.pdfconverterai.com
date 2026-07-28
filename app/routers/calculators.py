@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, FastAPI
 import logging
 from app.core.security import verify_api_key
 from app.core.config import settings
@@ -6,7 +6,7 @@ from app.services.calculators.percentage import calculate_percentage
 from app.services.calculators.loan import calculate_loan
 from app.services.calculators.age import calculate_age
 from app.services.calculators.bmi import calculate_bmi
-from app.services.calculators.financial_plan import calculate_financial_plan
+from app.services.calculators.financial_plan import FinancialPlanCalculator
 from app.models.calculators import (
     AgeCalculatorRequest,
     PercentageCalculatorRequest,
@@ -26,6 +26,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/calculators", tags=["Calculators"])
+
+def get_app() -> FastAPI:
+    from app.main import app
+    return app
 
 @router.get("/test", summary="Test Calculators endpoint")
 async def test_calculators(api_key: dict = Depends(verify_api_key)):
@@ -89,11 +93,12 @@ async def calculate_bmi_endpoint(request: BMICalculatorRequest, api_key: dict = 
         raise HTTPException(status_code=500, detail=f"Error calculating BMI: {str(e)}")
 
 @router.post("/financial_plan", summary="Calculate investment with sentiment adjustment")
-async def financial_plan(request: FinancialPlanRequest, api_key: dict = Depends(verify_api_key)):
-    logger.debug("🔧 Calculating financial plan: principal=%s, rate=%s, years=%s, sentiment=%s", 
+async def financial_plan(request: FinancialPlanRequest, app: FastAPI = Depends(get_app), api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Calculating financial plan: principal=%s, rate=%s, years=%s, sentiment=%s",
                  request.principal, request.rate, request.years, request.market_sentiment)
     try:
-        result = await calculate_financial_plan(
+        calculator = FinancialPlanCalculator(app)
+        result = await calculator.calculate_financial_plan(
             request.principal, request.rate, request.years, request.market_sentiment
         )
         logger.debug("✅ Financial plan result: %s", result)

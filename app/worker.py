@@ -8,13 +8,18 @@ transition Pending/Queued -> Processing, run the matching Processor's
 Validate/Prepare/Execute/Verify/Cleanup pipeline
 (`app/services/jobs/processor.py`), then transition to Completed/Failed.
 
-Heavy per-tool imports (pdf2docx for `pdf_to_word`, transformers/torch +
-the `facebook/bart-large-cnn` model for `pdf_summarize`) are deferred into
-each task function rather than imported at module scope, so the worker
-process itself starts up quickly regardless of which job types happen to
-run - `summarize.py`'s own import-time model loading is left exactly as-is
-per ADR-015 Open Item 2, this only controls *when* that module gets
-imported, not how it behaves once it is.
+Heavy per-tool imports (pdf2docx for `pdf_to_word`) are deferred into each
+task function rather than imported at module scope, so the worker process
+itself starts up quickly regardless of which job types happen to run.
+
+The `facebook/bart-large-cnn` model used by `pdf_summarize` is the one
+exception: it's loaded once per worker process in `on_startup()` below
+(ARQ's worker-process analogue of `app.state` in `app/main.py`) and handed
+to each `pdf_summarize` job via `ctx["summarizer_pipeline"]`, rather than
+being loaded eagerly at import time inside `app/services/pdf/summarize.py`
+(ADR-015 Open Item 2). The `transformers` import itself still only happens
+inside `on_startup()`, not at this module's top level, so importing
+`app.worker` stays light for any process that just needs `WorkerSettings`.
 """
 import logging
 import os
@@ -61,7 +66,7 @@ async def _run_job(ctx, job_id: str, make_processor, build_result) -> None:
     await mark_processing(job_id)
     processor = make_processor()
     try:
-        raw_result = await processor.run(job, file_doc)
+        raw_result = await processor.run(job, file_doc, ctx)
         result = await build_result(job, file_doc, raw_result)
         await mark_completed(job_id, result)
         logger.info("Job %s (%s) completed", job_id, job.type)
@@ -128,8 +133,38 @@ async def image_ocr(ctx, job_id: str) -> None:
     await _run_job(ctx, job_id, ImageOcrProcessor, build_result)
 
 
+async def on_startup(ctx: dict) -> None:
+    """Runs once per ARQ worker process (Handbook Part C.2/C.7, ADR-006) -
+    the worker-process analogue of `app.state` in `app/main.py`. Preloads
+    the `facebook/bart-large-cnn` summarization pipeline into `ctx` so every
+    `pdf_summarize` job reuses it instead of reloading per-job. `transformers`
+    is imported here, not at module scope, keeping this module's own import
+    light for anything that doesn't need it (see module docstring).
+    """
+    from transformers import pipeline
+
+    logger.info("Worker starting up: preloading facebook/bart-large-cnn")
+    try:
+        summarizer_pipeline = pipeline("summarization", model="facebook/bart-large-cnn", device="cpu")
+    except Exception as e:
+        logger.error("Failed to load summarizer_pipeline: %s", str(e))
+        raise
+    if not hasattr(summarizer_pipeline, "model"):
+        logger.error("summarizer_pipeline is invalid or not initialized")
+        raise ValueError("Invalid summarizer_pipeline")
+    ctx["summarizer_pipeline"] = summarizer_pipeline
+    logger.info("Worker startup complete: summarizer_pipeline loaded")
+
+
+async def on_shutdown(ctx: dict) -> None:
+    logger.info("Worker shutting down: cleaning up summarizer_pipeline")
+    ctx.pop("summarizer_pipeline", None)
+
+
 class WorkerSettings:
     functions = [pdf_convert, pdf_to_word, pdf_summarize, image_ocr]
+    on_startup = on_startup
+    on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_tries = MAX_TRIES
     job_timeout = 300
