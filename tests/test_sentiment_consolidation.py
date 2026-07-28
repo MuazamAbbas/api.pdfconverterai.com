@@ -29,19 +29,17 @@ suite - `app.core.security.verify_api_key` opens its own Motor client
 against `settings.database_url` on every call, so there's no way to fake
 this out without also faking Mongo.
 
-NOTE on router mounting: `app.routers.ai_tools`'s `router` is defined with
-`APIRouter(prefix="/v1/ai_tools", ...)` (the only router in `app/routers/`
-that bakes `/v1` into its own prefix - every sibling router just uses its
-bare resource prefix, e.g. `text.router`'s `prefix="/text"`). `app/main.py`
-then does `app.include_router(ai_tools.router, prefix="/v1", ...)` on top of
-that, which - unlike every other router - double-prefixes it to
-`/v1/v1/ai_tools/...` in the real running app. That looks like a pre-existing
-bug independent of this consolidation (`app/main.py` and the `ai_tools`
-router's own prefix were both untouched by it) - see the test-run report for
-details. This test file mounts `ai_tools.router` with *no* additional prefix
-(so it lands on the intended `/v1/ai_tools/...`, matching the task brief and
-every other router's convention), rather than reproducing the double-prefix
-bug.
+NOTE on router mounting: `app.routers.ai_tools`'s `router` used to be defined
+with `APIRouter(prefix="/v1/ai_tools", ...)` - the only router in
+`app/routers/` that baked `/v1` into its own prefix, while `app/main.py`
+separately did `app.include_router(ai_tools.router, prefix="/v1", ...)` on
+top of that, double-prefixing it to `/v1/v1/ai_tools/...` in the real running
+app. Fixed (ADR-015 Open Item 3): `ai_tools.router` now declares
+`prefix="/ai_tools"`, matching every sibling router's bare-resource-prefix
+convention (e.g. `text.router`'s `prefix="/text"`), and relies on the `/v1`
+mount prefix in `app/main.py` like everything else. This test file mounts
+`ai_tools.router` with an explicit `prefix="/v1"` (mirroring `app/main.py`)
+so it lands on `/v1/ai_tools/...`.
 """
 import os
 
@@ -72,12 +70,13 @@ asyncio_session = pytest.mark.asyncio(loop_scope="session")
 
 def build_sentiment_test_app() -> FastAPI:
     """Mounts only `ai_tools` (sentiment) and `text` - no `files`/`jobs`/`pdf`/
-    `image`, no `app.state.arq_redis` pool. See module docstring for why
-    `ai_tools.router` is mounted bare (no extra `/v1` prefix) instead of the
-    `app/main.py` pattern used for every other router.
+    `image`, no `app.state.arq_redis` pool. Mounts both routers the same way
+    `app/main.py` does (explicit `prefix="/v1"` on top of each router's own
+    bare resource prefix) now that `ai_tools.router` no longer bakes `/v1`
+    into its own prefix - see module docstring.
     """
     app = FastAPI()
-    app.include_router(ai_tools_router.router)
+    app.include_router(ai_tools_router.router, prefix="/v1")
     app.include_router(text_router.router, prefix="/v1")
 
     @app.exception_handler(StarletteHTTPException)
