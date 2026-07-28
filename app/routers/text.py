@@ -2,12 +2,11 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from app.models.text import TextRequest, TextResponse, SentimentResponse, GrammarResponse
+from app.models.text import TextRequest, TextResponse, GrammarResponse
 from app.core.security import verify_api_key
 from app.core.config import settings
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
 from app.services.jobs.service import create_job, mark_failed, mark_queued
-from app.services.text.sentiment import SentimentAnalyzer
 from app.services.text.grammar import correct_grammar
 from app.services.text.count import word_count, char_count, sentence_count, paragraph_count
 from app.shared.responses import api_error, envelope
@@ -218,27 +217,3 @@ async def paragraph_count_endpoint(request: TextRequest, api_key: dict = Depends
     except Exception as e:
         logger.exception("💥 Error counting paragraphs: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error counting paragraphs: {str(e)}")
-
-@router.post(
-    "/sentiment",
-    summary="Analyze sentiment of text using TextBlob",
-    response_model=SentimentResponse,
-    responses={
-        200: {"description": "Sentiment analysis returned"},
-        400: {"description": "Invalid input"},
-        500: {"description": "Server error"}
-    }
-)
-async def sentiment(request: TextRequest, api_key: dict = Depends(verify_api_key)):
-    logger.debug("😊 Analyzing sentiment for text: %s", request.text)
-    try:
-        analyzer = SentimentAnalyzer()
-        result = await analyzer.analyze(request.text)
-        logger.debug("✅ Sentiment analysis: %s", result)
-        return SentimentResponse(text=request.text, **result)
-    except ValueError as e:
-        logger.error("❌ Invalid input: %s", str(e))
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.exception("💥 Error analyzing sentiment: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error analyzing sentiment: {str(e)}")
