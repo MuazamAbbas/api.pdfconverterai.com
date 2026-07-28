@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1/ai_tools", tags=["AI Tools"])
+router = APIRouter(prefix="/ai_tools", tags=["AI Tools"])
 
 class TextRequest(BaseModel):
     text: str
