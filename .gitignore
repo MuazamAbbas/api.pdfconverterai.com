@@ -15,13 +15,17 @@ __pycache__/
 .env.*
 !.env.example
 
-# Application logs (rotated separately, not source-controlled)
-logs/
+# Application logs (rotated separately, not source-controlled). Anchored to
+# repo root - matches the same unanchored-pattern risk fixed for models/
+# below; confirmed via `find`/`git check-ignore` that no nested logs/ dir
+# exists anywhere in the tree today, so this is preventive, not a recovery.
+/logs/
 *.log
 
-# Build artifacts
-build/
-dist/
+# Build artifacts. Anchored to repo root for the same reason as /logs/ above -
+# confirmed no nested build/ or dist/ dir exists anywhere in the tree today.
+/build/
+/dist/
 *.egg-info/
 
 # Downloaded/cached ML model weights (large binary data, not source code).
