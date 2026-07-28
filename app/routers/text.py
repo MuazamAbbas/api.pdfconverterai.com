@@ -1,12 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, FastAPI
+from bson import ObjectId
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+
 from app.models.text import TextRequest, TextResponse, SentimentResponse, GrammarResponse
 from app.core.security import verify_api_key
 from app.core.config import settings
+from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
+from app.services.jobs.service import create_job, mark_failed, mark_queued
 from app.services.text.sentiment import SentimentAnalyzer
-from app.services.text.paraphrase import Paraphraser
-from app.services.text.summarize import Summarizer
 from app.services.text.grammar import correct_grammar
 from app.services.text.count import word_count, char_count, sentence_count, paragraph_count
+from app.shared.responses import api_error, envelope
 import logging
 import json
 
@@ -22,9 +26,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/text", tags=["Text Tools"])
 
-def get_app() -> FastAPI:
-    from app.main import app
-    return app
+
+class TextUploadRequest(BaseModel):
+    text: str
+
+
+class FileIdRequest(BaseModel):
+    file_id: str
+
 
 @router.get("/test", summary="Test Text Tools endpoint", response_model=TextResponse)
 async def test_text(api_key: dict = Depends(verify_api_key)):
@@ -37,53 +46,63 @@ async def test_text(api_key: dict = Depends(verify_api_key)):
         logger.exception("💥 Error in test endpoint: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error in test endpoint: {str(e)}")
 
-@router.post(
-    "/paraphrase",
-    summary="Paraphrase text using AI",
-    response_model=TextResponse,
-    responses={
-        200: {"description": "Paraphrased text returned"},
-        400: {"description": "Invalid input"},
-        500: {"description": "Server error"}
-    }
-)
-async def paraphrase(request: TextRequest, app: FastAPI = Depends(get_app), _ = Depends(verify_api_key)):
-    logger.debug("🔧 Paraphrasing text: %s", request.text)
+@router.post("/upload", summary="Upload text input for paraphrase/summarize jobs")
+async def upload_text(payload: TextUploadRequest, api_key: dict = Depends(verify_api_key)):
+    """Tier 1 - writes `text` to disk and registers a `files` record for it,
+    the same way `app/routers/pdf.py`'s `upload_pdf` does for a real upload,
+    so `POST /text/paraphrase`/`POST /text/summarize` can reference it by
+    `file_id` (Handbook Part C.3/C.5).
+    """
     try:
-        paraphraser = Paraphraser(app)
-        paraphrased = await paraphraser.paraphrase(request.text)
-        logger.debug("✅ Paraphrased text: %s", paraphrased)
-        return TextResponse(text=request.text, result={"paraphrased": paraphrased})
-    except ValueError as e:
-        logger.error("❌ Invalid input: %s", str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        owner_id = ObjectId(api_key["key_data"]["_id"])
+        file_doc = await save_text_input(payload.text, owner_id, "text_input.txt")
+    except UploadValidationError as e:
+        logger.warning("Text upload rejected: %s", e.message)
+        raise api_error(e.status_code, e.message, e.error_code)
     except Exception as e:
-        logger.exception("💥 Error paraphrasing text: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error paraphrasing text: {str(e)}")
+        logger.exception("Text upload failed: %s", str(e))
+        raise api_error(500, "Failed to upload text", "UPLOAD_FAILED")
 
-@router.post(
-    "/summarize",
-    summary="Summarize text using AI",
-    response_model=TextResponse,
-    responses={
-        200: {"description": "Summarized text returned"},
-        400: {"description": "Invalid input"},
-        500: {"description": "Server error"}
-    }
-)
-async def summarize(request: TextRequest, app: FastAPI = Depends(get_app), _ = Depends(verify_api_key)):
-    logger.debug("📝 Summarizing text: %s", request.text)
+    logger.info("Text uploaded: id=%s", file_doc.id)
+    return envelope(True, "Text uploaded", data={"file_id": str(file_doc.id), "filename": file_doc.originalFilename})
+
+
+async def _create_text_job(request: Request, file_id: str, job_type: str, api_key: dict) -> dict:
+    """Mirrors `app/routers/pdf.py`'s `_create_pdf_job` / `app/routers/image.py`'s
+    `_create_image_job` (Handbook Part C.4): ownership check, create the Job,
+    enqueue the matching ARQ task, transition Pending -> Queued.
+    """
+    file_doc = await get_file_by_id(file_id)
+    if file_doc is None:
+        raise api_error(404, "File not found or has expired", "FILE_NOT_FOUND")
+
+    owner_id = str(api_key["key_data"]["_id"])
+    if str(file_doc.ownerApiKeyId) != owner_id:
+        raise api_error(403, "Not authorized to use this file", "FILE_FORBIDDEN")
+
+    job = await create_job(file_doc.id, job_type)
     try:
-        summarizer = Summarizer(app)
-        summary = await summarizer.summarize_text(request.text)
-        logger.debug("✅ Summarized text: %s", summary)
-        return TextResponse(text=request.text, result={"summary": summary})
-    except ValueError as e:
-        logger.error("❌ Invalid input: %s", str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        await request.app.state.arq_redis.enqueue_job(job_type, str(job.id), _job_id=str(job.id))
+        await mark_queued(str(job.id))
     except Exception as e:
-        logger.exception("💥 Error summarizing text: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error summarizing text: {str(e)}")
+        logger.exception("Failed to enqueue job %s (%s): %s", job.id, job_type, str(e))
+        await mark_failed(str(job.id), "Failed to queue job for processing")
+        raise api_error(503, "Job queue is temporarily unavailable", "QUEUE_UNAVAILABLE")
+
+    logger.info("Created job %s (%s) for file %s", job.id, job_type, file_id)
+    return {"job_id": str(job.id), "status": "queued"}
+
+
+@router.post("/paraphrase", summary="Paraphrase text using AI (async job)")
+async def paraphrase(payload: FileIdRequest, request: Request, api_key: dict = Depends(verify_api_key)):
+    data = await _create_text_job(request, payload.file_id, "text_paraphrase", api_key)
+    return envelope(True, "Paraphrase job created", data=data)
+
+
+@router.post("/summarize", summary="Summarize text using AI (async job)")
+async def summarize(payload: FileIdRequest, request: Request, api_key: dict = Depends(verify_api_key)):
+    data = await _create_text_job(request, payload.file_id, "text_summarize", api_key)
+    return envelope(True, "Summarization job created", data=data)
 
 @router.post(
     "/grammar",
