@@ -38,8 +38,17 @@ class Processor:
         """Stage anything `execute()` needs (paths, temp dirs). Returned dict is passed through."""
         return {}
 
-    async def execute(self, job: Any, file_doc: Any, prepared: dict[str, Any]) -> dict[str, Any]:
-        """Do the actual work. Must be overridden."""
+    async def execute(
+        self, job: Any, file_doc: Any, prepared: dict[str, Any], ctx: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Do the actual work. Must be overridden.
+
+        `ctx` is the ARQ worker-process context dict from `app/worker.py`
+        (the worker-process analogue of FastAPI's `app.state`) - it carries
+        anything loaded once per worker process in `WorkerSettings.on_startup`
+        (e.g. `ctx["summarizer_pipeline"]`). Most processors don't need it
+        and can ignore the parameter.
+        """
         raise NotImplementedError
 
     async def verify(self, job: Any, file_doc: Any, result: dict[str, Any]) -> None:
@@ -50,12 +59,12 @@ class Processor:
         """Release anything `prepare()`/`execute()` created. Always runs, success or failure."""
         return None
 
-    async def run(self, job: Any, file_doc: Any) -> dict[str, Any]:
+    async def run(self, job: Any, file_doc: Any, ctx: dict[str, Any] | None = None) -> dict[str, Any]:
         prepared: dict[str, Any] = {}
         try:
             await self.validate(job, file_doc)
             prepared = await self.prepare(job, file_doc)
-            result = await self.execute(job, file_doc, prepared)
+            result = await self.execute(job, file_doc, prepared, ctx)
             await self.verify(job, file_doc, result)
             return result
         finally:
