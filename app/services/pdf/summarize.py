@@ -17,10 +17,21 @@ async def summarize_pdf_service(file_path: str, summarizer) -> str:
     Returns:
         str: Summarized text.
     Raises:
-        ValueError: If no text is extracted or text is too short.
+        ValueError: If the PDF can't be opened/parsed, or no text is
+            extracted, or extracted text is too short - treated as a
+            permanent, non-retryable failure by the caller (ADR-003:
+            corrupted/unsupported input never retries). `extract_text_from_pdf`
+            in `convert.py` reaches the same ValueError-on-permanent-failure
+            outcome via a PyPDF2 fallback before giving up; this function has
+            no fallback, so it raises directly on the first open failure.
     """
     try:
         doc = pymupdf.open(file_path)
+    except Exception as e:
+        logger.error("Failed to open PDF for summarization: %s (%s)", file_path, str(e))
+        raise ValueError("Invalid or unreadable PDF file") from e
+
+    try:
         text = ""
         for page in doc:
             extracted_text = page.get_text("text")

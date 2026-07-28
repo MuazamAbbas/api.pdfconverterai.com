@@ -78,34 +78,24 @@ async def test_no_pipeline_in_ctx_retries_instead_of_failing(api_key, test_pdf_b
     assert updated.retryCount == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (pre-existing, not introduced by ADR-015 Open Item 2): "
-        "app.services.pdf.summarize.summarize_pdf_service calls "
-        "pymupdf.open(file_path) with no try/except around the open call - "
-        "for a corrupted/malformed PDF, pymupdf raises pymupdf.FileDataError "
-        "(a RuntimeError subclass), never ValueError. "
-        "PdfSummarizeProcessor.execute() only maps ValueError to "
-        "PermanentProcessingError; everything else (including FileDataError) "
-        "falls through to its generic `except Exception` branch and becomes "
-        "TransientProcessingError instead. Net effect: a corrupted PDF "
-        "submitted to pdf_summarize gets retried 3 times before failing, "
-        "unlike pdf_convert's PdfConvertProcessor (app/services/pdf/convert.py's "
-        "extract_text_from_pdf explicitly raises ValueError for the same "
-        "corrupt_pdf_bytes fixture, and PdfConvertProcessor.execute() maps "
-        "that to PermanentProcessingError - see "
-        "tests/test_worker_retry.py::test_permanent_failure_corrupt_pdf_fails_immediately_no_retry). "
-        "Fix: either wrap pymupdf.open() in summarize_pdf_service to convert "
-        "parse failures into ValueError (mirroring extract_text_from_pdf), or "
-        "have PdfSummarizeProcessor.execute() catch pymupdf's own exception "
-        "type(s) explicitly. Flagged for backend-builder, not fixed here - "
-        "out of this test-writing session's scope to change production code."
-    ),
-)
 async def test_permanent_failure_corrupt_pdf_fails_immediately_no_retry(
     api_key, corrupt_pdf_bytes
 ):
+    """Regression test for the bug found during the ai-module-loading session:
+    `summarize_pdf_service` used to call `pymupdf.open(file_path)` with no
+    try/except around the open call - for a corrupted/malformed PDF, pymupdf
+    raises `pymupdf.FileDataError` (a `RuntimeError` subclass), never
+    `ValueError`, so `PdfSummarizeProcessor.execute()`'s `except ValueError`
+    mapping never caught it and it fell through to the generic
+    `except Exception` branch, becoming `TransientProcessingError` instead of
+    `PermanentProcessingError` - i.e. a corrupted PDF got retried 3 times
+    before failing, unlike `pdf_convert`'s correct immediate-permanent-failure
+    behavior for the same input (see
+    `tests/test_worker_retry.py::test_permanent_failure_corrupt_pdf_fails_immediately_no_retry`).
+    Fixed by wrapping `pymupdf.open()` in `summarize_pdf_service` to convert
+    open/parse failures into `ValueError`, mirroring
+    `extract_text_from_pdf`'s convention in `convert.py`.
+    """
     file_doc = await _make_pdf_file_doc(api_key["id"], corrupt_pdf_bytes, "summarize-corrupt-test.pdf")
     job = await create_job(file_doc.id, "pdf_summarize")
 
