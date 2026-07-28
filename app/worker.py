@@ -1,5 +1,6 @@
-"""ARQ worker process entrypoint for Tier 2 PDF/Image jobs (Handbook Part
-C.2/C.4/C.7, ADR-003 Processing Engine, ADR-006 ARQ). Run with:
+"""ARQ worker process entrypoint for Tier 2 PDF/Image/Text/Web Tools jobs
+(Handbook Part C.2/C.4/C.7, ADR-003 Processing Engine, ADR-006 ARQ). Run
+with:
 
     arq app.worker.WorkerSettings
 
@@ -12,14 +13,19 @@ Heavy per-tool imports (pdf2docx for `pdf_to_word`) are deferred into each
 task function rather than imported at module scope, so the worker process
 itself starts up quickly regardless of which job types happen to run.
 
-The `facebook/bart-large-cnn` model used by `pdf_summarize` is the one
-exception: it's loaded once per worker process in `on_startup()` below
-(ARQ's worker-process analogue of `app.state` in `app/main.py`) and handed
-to each `pdf_summarize` job via `ctx["summarizer_pipeline"]`, rather than
-being loaded eagerly at import time inside `app/services/pdf/summarize.py`
-(ADR-015 Open Item 2). The `transformers` import itself still only happens
-inside `on_startup()`, not at this module's top level, so importing
-`app.worker` stays light for any process that just needs `WorkerSettings`.
+The `facebook/bart-large-cnn` model used by `pdf_summarize`, and the
+t5-small `text2text-generation`/`summarization` models used by
+`text_paraphrase`/`text_summarize`/`web_tools_summarize`, are the exception:
+each is loaded once per worker process in `on_startup()` below (ARQ's
+worker-process analogue of `app.state` in `app/main.py`) and handed to the
+matching job via `ctx["summarizer_pipeline"]`/`ctx["paraphrase_pipeline"]`/
+`ctx["summarize_pipeline"]`, rather than being loaded eagerly at import time
+or read off `app.state` in the FastAPI request process (ADR-015 Open Item
+2 - the t5-small pipelines moved here from `app/main.py`'s `startup_event()`
+once `text`/`web_tools` summarize/paraphrase became Tier 2 jobs). The
+`transformers` import itself still only happens inside `on_startup()`, not
+at this module's top level, so importing `app.worker` stays light for any
+process that just needs `WorkerSettings`.
 """
 import logging
 import os
@@ -133,13 +139,44 @@ async def image_ocr(ctx, job_id: str) -> None:
     await _run_job(ctx, job_id, ImageOcrProcessor, build_result)
 
 
+async def text_paraphrase(ctx, job_id: str) -> None:
+    from app.services.text.processors import TextParaphraseProcessor
+
+    async def build_result(job, file_doc, raw_result):
+        return raw_result  # {"paraphrased": "..."}
+
+    await _run_job(ctx, job_id, TextParaphraseProcessor, build_result)
+
+
+async def text_summarize(ctx, job_id: str) -> None:
+    from app.services.text.processors import TextSummarizeProcessor
+
+    async def build_result(job, file_doc, raw_result):
+        return raw_result  # {"summary": "..."}
+
+    await _run_job(ctx, job_id, TextSummarizeProcessor, build_result)
+
+
+async def web_tools_summarize(ctx, job_id: str) -> None:
+    from app.services.web_tools.processors import WebToolsSummarizeProcessor
+
+    async def build_result(job, file_doc, raw_result):
+        return raw_result  # {"summary": "..."}
+
+    await _run_job(ctx, job_id, WebToolsSummarizeProcessor, build_result)
+
+
 async def on_startup(ctx: dict) -> None:
     """Runs once per ARQ worker process (Handbook Part C.2/C.7, ADR-006) -
     the worker-process analogue of `app.state` in `app/main.py`. Preloads
-    the `facebook/bart-large-cnn` summarization pipeline into `ctx` so every
-    `pdf_summarize` job reuses it instead of reloading per-job. `transformers`
-    is imported here, not at module scope, keeping this module's own import
-    light for anything that doesn't need it (see module docstring).
+    the `facebook/bart-large-cnn` summarization pipeline plus the t5-small
+    paraphrase/summarization pipelines (formerly loaded into `app.state` at
+    FastAPI startup - ADR-015 Open Item 2 - now that `text_paraphrase`/
+    `text_summarize`/`web_tools_summarize` are Tier 2 jobs run from this
+    worker process instead) into `ctx` so every job of that type reuses them
+    instead of reloading per-job. `transformers` is imported here, not at
+    module scope, keeping this module's own import light for anything that
+    doesn't need it (see module docstring).
     """
     from transformers import pipeline
 
@@ -155,14 +192,46 @@ async def on_startup(ctx: dict) -> None:
     ctx["summarizer_pipeline"] = summarizer_pipeline
     logger.info("Worker startup complete: summarizer_pipeline loaded")
 
+    logger.info("Worker starting up: preloading t5-small paraphrase/summarize pipelines")
+    try:
+        paraphrase_pipeline = pipeline("text2text-generation", model="t5-small", device="cpu")
+    except Exception as e:
+        logger.error("Failed to load paraphrase_pipeline: %s", str(e))
+        raise
+    if not hasattr(paraphrase_pipeline, "model"):
+        logger.error("paraphrase_pipeline is invalid or not initialized")
+        raise ValueError("Invalid paraphrase_pipeline")
+    ctx["paraphrase_pipeline"] = paraphrase_pipeline
+
+    try:
+        summarize_pipeline = pipeline("summarization", model="t5-small", device="cpu")
+    except Exception as e:
+        logger.error("Failed to load summarize_pipeline: %s", str(e))
+        raise
+    if not hasattr(summarize_pipeline, "model"):
+        logger.error("summarize_pipeline is invalid or not initialized")
+        raise ValueError("Invalid summarize_pipeline")
+    ctx["summarize_pipeline"] = summarize_pipeline
+    logger.info("Worker startup complete: paraphrase_pipeline/summarize_pipeline loaded")
+
 
 async def on_shutdown(ctx: dict) -> None:
-    logger.info("Worker shutting down: cleaning up summarizer_pipeline")
+    logger.info("Worker shutting down: cleaning up summarizer_pipeline/paraphrase_pipeline/summarize_pipeline")
     ctx.pop("summarizer_pipeline", None)
+    ctx.pop("paraphrase_pipeline", None)
+    ctx.pop("summarize_pipeline", None)
 
 
 class WorkerSettings:
-    functions = [pdf_convert, pdf_to_word, pdf_summarize, image_ocr]
+    functions = [
+        pdf_convert,
+        pdf_to_word,
+        pdf_summarize,
+        image_ocr,
+        text_paraphrase,
+        text_summarize,
+        web_tools_summarize,
+    ]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)

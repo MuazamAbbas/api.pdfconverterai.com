@@ -155,6 +155,57 @@ async def save_uploaded_file(
     return FileDocument(**doc)
 
 
+async def save_text_input(
+    text: str, owner_api_key_id: ObjectId, original_filename: str
+) -> FileDocument:
+    """Write a text/URL input (not a real file upload) to disk and record it
+    in `files`, the same shape as `save_uploaded_file`.
+
+    Used by `text`/`web_tools` Tier 1 upload endpoints (`POST /text/upload`,
+    `POST /web_tools/upload`) so a plain-text body or a URL string can be
+    referenced by `file_id` the same way a real uploaded file is, letting
+    the Tier 2 paraphrase/summarize jobs downstream consume it through the
+    same `get_file_by_id`/`file_doc.storagePath` contract as `pdf`/`image`.
+
+    No magic-byte check (this was never a real upload format to begin with),
+    but the same size cap and an empty/whitespace-only rejection still
+    apply. Raises `UploadValidationError` on either failure.
+    """
+    if not text or not text.strip():
+        raise UploadValidationError("Text input must not be empty", "TEXT_INPUT_EMPTY")
+
+    content = text.encode("utf-8")
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
+        raise UploadValidationError(
+            f"Text input exceeds the maximum upload size of {settings.max_upload_size_mb}MB",
+            "FILE_TOO_LARGE",
+            status_code=413,
+        )
+
+    safe_name = _sanitize_filename(original_filename)
+    checksum = hashlib.sha256(content).hexdigest()
+
+    os.makedirs(STORAGE_PATH, exist_ok=True)
+    stored_name = f"{uuid.uuid4()}-{safe_name}"
+    storage_path = os.path.join(STORAGE_PATH, stored_name)
+    with open(storage_path, "w", encoding="utf-8") as out:
+        out.write(text)
+
+    file_create = FileCreate(
+        storagePath=storage_path,
+        checksum=checksum,
+        originalFilename=safe_name,
+        sizeBytes=len(content),
+        mimeType="text/plain",
+        ownerApiKeyId=owner_api_key_id,
+    )
+    insert_result = await db.files.insert_one(file_create.model_dump(by_alias=True))
+    doc = await db.files.find_one({"_id": insert_result.inserted_id})
+    logger.info("Saved text input '%s' as file %s (%d bytes)", safe_name, insert_result.inserted_id, len(content))
+    return FileDocument(**doc)
+
+
 async def save_output_file(
     local_path: str, owner_api_key_id: ObjectId, original_filename: str, mime_type: str
 ) -> FileDocument:
