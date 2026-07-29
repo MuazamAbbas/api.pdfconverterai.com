@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
 import logging
-from app.core.security import verify_api_key
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
 from app.core.config import settings
+from app.core.security import verify_api_key
 
 logging.basicConfig(
     level=settings.log_level,

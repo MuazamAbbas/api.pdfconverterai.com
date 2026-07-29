@@ -1,5 +1,6 @@
-import pymupdf
 import logging
+
+import pymupdf
 
 logger = logging.getLogger(__name__)
 

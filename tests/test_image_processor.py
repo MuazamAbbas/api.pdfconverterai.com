@@ -26,8 +26,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.jobs.processor import PermanentProcessingError, TransientProcessingError
 from app.services.image.processors import ImageOcrProcessor
+from app.services.jobs.processor import PermanentProcessingError, TransientProcessingError
 
 # Same session-scoped loop as every other test module (see
 # tests/test_worker_retry.py's comment) - kept for suite-wide consistency

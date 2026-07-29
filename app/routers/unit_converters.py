@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends
 import logging
-from app.core.security import verify_api_key
+
+from fastapi import APIRouter, Depends, HTTPException
+
 from app.core.config import settings
-from app.models.unit_converters import LengthConvertRequest, ContextualConvertRequest
+from app.core.security import verify_api_key
+from app.models.unit_converters import ContextualConvertRequest, LengthConvertRequest
 from app.services.unit_converters.contextual_convert import contextual_convert
 
 logging.basicConfig(

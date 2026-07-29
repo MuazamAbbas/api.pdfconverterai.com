@@ -1,7 +1,8 @@
-from transformers import pipeline
-from PIL import Image
 import io
 import logging
+
+from PIL import Image
+from transformers import pipeline
 
 logger = logging.getLogger(__name__)
 captioner = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")

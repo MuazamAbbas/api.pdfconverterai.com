@@ -1,24 +1,40 @@
-from fastapi import FastAPI, Request, Depends, HTTPException
+import logging
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from arq.connections import RedisSettings, create_pool
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from arq.connections import RedisSettings, create_pool
-from app.core.security import verify_api_key
+from transformers import pipeline
+
 from app.core.config import settings
 from app.core.database import ensure_indexes
+from app.core.security import verify_api_key
 from app.core.storage import cleanup_expired_files
 from app.routers import (
-    ai_tools, seo_tools, web_tools, downloaders, unit_converters,
-    binary_tools, calculators, cyber_security, miscellaneous,
-    pdf, text, image, video, categories, tools, files, jobs
+    ai_tools,
+    binary_tools,
+    calculators,
+    categories,
+    cyber_security,
+    downloaders,
+    files,
+    image,
+    jobs,
+    miscellaneous,
+    pdf,
+    seo_tools,
+    text,
+    tools,
+    unit_converters,
+    video,
+    web_tools,
 )
-import logging
-from transformers import pipeline
 
 # Logging setup
 logging.basicConfig(

@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 
+
 class AgeCalculatorRequest(BaseModel):
     birth_date: str  # Format: YYYY-MM-DD
 

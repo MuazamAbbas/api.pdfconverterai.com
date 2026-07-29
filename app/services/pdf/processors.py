@@ -23,7 +23,11 @@ import logging
 import os
 
 from app.core.storage import STORAGE_PATH
-from app.services.jobs.processor import PermanentProcessingError, Processor, TransientProcessingError
+from app.services.jobs.processor import (
+    PermanentProcessingError,
+    Processor,
+    TransientProcessingError,
+)
 from app.services.pdf.convert import extract_text_from_pdf
 
 logger = logging.getLogger(__name__)
