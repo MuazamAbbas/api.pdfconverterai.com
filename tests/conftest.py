@@ -42,19 +42,24 @@ from app.routers import files as files_router
 from app.routers import image as image_router
 from app.routers import jobs as jobs_router
 from app.routers import pdf as pdf_router
+from app.routers import text as text_router
+from app.routers import web_tools as web_tools_router
 
 
 def build_test_app() -> FastAPI:
     """Mirrors the router mounting + exception handlers from `app/main.py`
-    for just the routers this task touched (`files`, `jobs`, `pdf`, and now
-    `image` for the OCR-via-Job-System reconciliation work), without any of
-    the startup-time model preloading / unrelated routers that make the real
-    `app.main` unimportable in this environment."""
+    for just the routers this task touched (`files`, `jobs`, `pdf`, `image`
+    for the OCR-via-Job-System reconciliation work, and now `text`/
+    `web_tools` for the text/web_tools Job System HTTP test suite), without
+    any of the startup-time model preloading / unrelated routers that make
+    the real `app.main` unimportable in this environment."""
     app = FastAPI()
     app.include_router(files_router.router, prefix="/v1")
     app.include_router(jobs_router.router, prefix="/v1")
     app.include_router(pdf_router.router, prefix="/v1")
     app.include_router(image_router.router, prefix="/v1")
+    app.include_router(text_router.router, prefix="/v1")
+    app.include_router(web_tools_router.router, prefix="/v1")
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
