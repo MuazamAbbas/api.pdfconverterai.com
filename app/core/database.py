@@ -1,6 +1,8 @@
 import logging
 from urllib.parse import urlsplit, urlunsplit
+
 from motor.motor_asyncio import AsyncIOMotorClient
+
 from app.core.config import settings
 
 logging.basicConfig(level=settings.log_level)

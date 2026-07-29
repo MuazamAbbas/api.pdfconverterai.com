@@ -1,5 +1,5 @@
-from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
+from PIL import Image, ImageEnhance, ImageFilter
 
 image = Image.open("test_image.png").convert("RGB")
 image = image.resize((image.width * 2, image.height * 2), Image.LANCZOS)

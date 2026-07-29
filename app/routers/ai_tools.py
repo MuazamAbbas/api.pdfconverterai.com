@@ -1,9 +1,11 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from app.core.security import verify_api_key
-from app.core.config import settings
-from app.services.ai_tools.sentiment import analyze_sentiment_service
 import logging
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from app.core.config import settings
+from app.core.security import verify_api_key
+from app.services.ai_tools.sentiment import analyze_sentiment_service
 
 logging.basicConfig(
     level=settings.log_level,

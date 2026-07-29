@@ -1,5 +1,5 @@
-from sentence_transformers import SentenceTransformer, util
 import torch
+from sentence_transformers import SentenceTransformer, util
 
 paraphraser = SentenceTransformer('sentence-transformers/paraphrase-MiniLM-L6-v2')
 text = "The quick brown fox jumps over the lazy dog"

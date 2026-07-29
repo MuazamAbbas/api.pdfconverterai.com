@@ -34,8 +34,9 @@ def _tesseract_available() -> bool:
     OCR binary rather than weakening it into a mock; every other test in
     this module does not depend on Tesseract at all.
     """
-    import app.services.image.ocr  # noqa: F401  (sets pytesseract.pytesseract.tesseract_cmd)
     import pytesseract
+
+    import app.services.image.ocr  # noqa: F401  (sets pytesseract.pytesseract.tesseract_cmd)
 
     try:
         pytesseract.get_tesseract_version()

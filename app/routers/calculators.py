@@ -1,19 +1,21 @@
-from fastapi import APIRouter, HTTPException, Depends, FastAPI
 import logging
-from app.core.security import verify_api_key
+
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
+
 from app.core.config import settings
-from app.services.calculators.percentage import calculate_percentage
-from app.services.calculators.loan import calculate_loan
+from app.core.security import verify_api_key
+from app.models.calculators import (
+    AgeCalculatorRequest,
+    BMICalculatorRequest,
+    FinancialPlanRequest,
+    LoanCalculatorRequest,
+    PercentageCalculatorRequest,
+)
 from app.services.calculators.age import calculate_age
 from app.services.calculators.bmi import calculate_bmi
 from app.services.calculators.financial_plan import FinancialPlanCalculator
-from app.models.calculators import (
-    AgeCalculatorRequest,
-    PercentageCalculatorRequest,
-    LoanCalculatorRequest,
-    BMICalculatorRequest,
-    FinancialPlanRequest
-)
+from app.services.calculators.loan import calculate_loan
+from app.services.calculators.percentage import calculate_percentage
 
 logging.basicConfig(
     level=settings.log_level,

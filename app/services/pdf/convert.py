@@ -8,8 +8,8 @@ Extracted out of `app/routers/pdf.py` (was inline in the old synchronous
 """
 import logging
 
-import PyPDF2
 import pymupdf  # MuPDF for better text extraction
+import PyPDF2
 
 logger = logging.getLogger(__name__)
 

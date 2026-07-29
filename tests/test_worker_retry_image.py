@@ -40,9 +40,10 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def _make_file_doc(owner_id, content: bytes, filename: str):
+    import hashlib
+
     from app.core.database import db
     from app.schemas.file import FileCreate, FileDocument
-    import hashlib
 
     os.makedirs(STORAGE_PATH, exist_ok=True)
     storage_path = os.path.join(STORAGE_PATH, filename)

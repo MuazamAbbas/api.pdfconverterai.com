@@ -15,7 +15,11 @@ import os
 
 from app.services.files.service import IMAGE_ALLOWED_EXTENSIONS
 from app.services.image.ocr import extract_text_from_image
-from app.services.jobs.processor import PermanentProcessingError, Processor, TransientProcessingError
+from app.services.jobs.processor import (
+    PermanentProcessingError,
+    Processor,
+    TransientProcessingError,
+)
 
 logger = logging.getLogger(__name__)
 

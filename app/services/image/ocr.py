@@ -1,7 +1,8 @@
-import pytesseract
-from PIL import Image, ImageEnhance
 import io
 import logging
+
+import pytesseract
+from PIL import Image, ImageEnhance
 
 # Explicitly set Tesseract path
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
