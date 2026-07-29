@@ -1,6 +1,6 @@
-"""ARQ worker process entrypoint for Tier 2 PDF/Image/Text/Web Tools jobs
-(Handbook Part C.2/C.4/C.7, ADR-003 Processing Engine, ADR-006 ARQ). Run
-with:
+"""ARQ worker process entrypoint for Tier 2 PDF/Image/Text/Web Tools/
+Downloaders jobs (Handbook Part C.2/C.4/C.7, ADR-003 Processing Engine,
+ADR-006 ARQ). Run with:
 
     arq app.worker.WorkerSettings
 
@@ -30,7 +30,7 @@ process that just needs `WorkerSettings`.
 import logging
 import os
 
-from arq import Retry
+from arq import Retry, func
 from arq.connections import RedisSettings
 
 from app.core.config import settings
@@ -166,6 +166,28 @@ async def web_tools_summarize(ctx, job_id: str) -> None:
     await _run_job(ctx, job_id, WebToolsSummarizeProcessor, build_result)
 
 
+async def downloaders_youtube(ctx, job_id: str) -> None:
+    from app.services.downloaders.processors import DownloadersYoutubeProcessor
+
+    async def build_result(job, file_doc, raw_result):
+        base_name = os.path.splitext(file_doc.originalFilename)[0]
+        title = raw_result.get("title") or base_name
+        ext = raw_result.get("ext") or "mp4"
+        output_doc = await save_output_file(
+            local_path=raw_result["output_path"],
+            owner_api_key_id=file_doc.ownerApiKeyId,
+            original_filename=f"{title}.{ext}",
+            # `format: "best"` doesn't guarantee mp4 - see
+            # `app/services/downloaders/processors.py`'s `_EXT_MIME_TYPES`
+            # comment for the known limitation (falls back to
+            # application/octet-stream for an unmapped container).
+            mime_type=raw_result.get("mime_type", "application/octet-stream"),
+        )
+        return {"outputFileId": str(output_doc.id)}
+
+    await _run_job(ctx, job_id, DownloadersYoutubeProcessor, build_result)
+
+
 async def on_startup(ctx: dict) -> None:
     """Runs once per ARQ worker process (Handbook Part C.2/C.7, ADR-006) -
     the worker-process analogue of `app.state` in `app/main.py`. Preloads
@@ -231,9 +253,23 @@ class WorkerSettings:
         text_paraphrase,
         text_summarize,
         web_tools_summarize,
+        # `downloaders_youtube` gets its own longer `timeout` (arq 0.28.0's
+        # `func()` supports a genuine per-function override, confirmed
+        # against the installed arq version rather than assumed - see
+        # `arq.worker.Function`/`arq.worker.func`). A full video download
+        # has fundamentally different latency characteristics than the
+        # other jobs below sharing the flat `job_timeout = 300` (5 min)
+        # default - 600s (10 min) gives realistically long/slow-connection
+        # downloads room to finish without regressing the 5-minute budget
+        # every other job type here still gets.
+        func(downloaders_youtube, timeout=600),
     ]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_tries = MAX_TRIES
+    # Global fallback for every job type above that isn't given its own
+    # `func(..., timeout=...)` override (Handbook Part C.4 - see
+    # `downloaders_youtube`'s per-function override above for the one
+    # exception, and its comment for why it needs one).
     job_timeout = 300
