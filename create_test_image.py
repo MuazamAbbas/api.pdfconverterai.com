@@ -1,5 +1,4 @@
 from PIL import Image, ImageDraw, ImageFont
-import os
 
 # Create high-resolution image (300 DPI equivalent)
 width, height = 600, 300  # 3x larger for 300 DPI at 200x100 effective size

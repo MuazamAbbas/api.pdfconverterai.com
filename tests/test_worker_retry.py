@@ -22,7 +22,9 @@ from arq import Retry
 import app.worker as worker
 from app.core.storage import STORAGE_PATH
 from app.schemas.job import JobStatus
-from app.services.files.service import save_output_file  # noqa: F401  (keeps parity with worker's imports)
+from app.services.files.service import (
+    save_output_file,  # noqa: F401  (keeps parity with worker's imports)
+)
 from app.services.jobs.service import create_job, get_job
 
 # `app.core.database.db` is a Motor client created once at import time and
@@ -35,9 +37,10 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def _make_file_doc(owner_id, content: bytes, filename: str):
+    import hashlib
+
     from app.core.database import db
     from app.schemas.file import FileCreate
-    import hashlib
 
     os.makedirs(STORAGE_PATH, exist_ok=True)
     storage_path = os.path.join(STORAGE_PATH, filename)

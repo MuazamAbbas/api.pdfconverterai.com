@@ -1,5 +1,6 @@
-from textblob import TextBlob
 import logging
+
+from textblob import TextBlob
 
 logger = logging.getLogger(__name__)
 

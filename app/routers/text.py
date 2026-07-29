@@ -1,17 +1,18 @@
+import json
+import logging
+
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from app.models.text import TextRequest, TextResponse, GrammarResponse
-from app.core.security import verify_api_key
 from app.core.config import settings
+from app.core.security import verify_api_key
+from app.models.text import GrammarResponse, TextRequest, TextResponse
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
 from app.services.jobs.service import create_job, mark_failed, mark_queued
+from app.services.text.count import char_count, paragraph_count, sentence_count, word_count
 from app.services.text.grammar import correct_grammar
-from app.services.text.count import word_count, char_count, sentence_count, paragraph_count
 from app.shared.responses import api_error, envelope
-import logging
-import json
 
 logging.basicConfig(
     level=settings.log_level,

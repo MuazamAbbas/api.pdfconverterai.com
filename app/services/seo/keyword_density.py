@@ -1,8 +1,9 @@
+import logging
 import re
 from collections import Counter
-import logging
-from nltk.corpus import stopwords
+
 import nltk
+from nltk.corpus import stopwords
 
 logger = logging.getLogger(__name__)
 

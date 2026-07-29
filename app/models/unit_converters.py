@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 
+
 class LengthConvertRequest(BaseModel):
     value: float
     from_unit: str

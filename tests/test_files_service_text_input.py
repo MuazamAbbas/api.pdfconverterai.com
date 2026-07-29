@@ -12,9 +12,8 @@ inserts a `files` document) via the `api_key` fixture from `tests/conftest.py`,
 whose own teardown (`_cleanup_api_key`) already deletes every file (Mongo doc
 + on-disk bytes) owned by that key, so no separate cleanup is needed here.
 """
-from bson import ObjectId
-
 import pytest
+from bson import ObjectId
 
 from app.core.config import settings
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input

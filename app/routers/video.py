@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import HttpUrl
 import logging
-from app.core.security import verify_api_key
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import HttpUrl
+
 from app.core.config import settings
+from app.core.security import verify_api_key
 from app.services.video.youtube_metadata import fetch_youtube_metadata
 
 logging.basicConfig(

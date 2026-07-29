@@ -12,7 +12,7 @@ no live frontend consumer of them yet.
 import logging
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, Request, UploadFile, File
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from pydantic import BaseModel
 
 from app.core.security import verify_api_key

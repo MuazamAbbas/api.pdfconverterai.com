@@ -1,6 +1,7 @@
+import logging
+
 import nltk
 from nltk.tokenize import word_tokenize
-import logging
 
 logger = logging.getLogger(__name__)
 nltk.download('punkt', quiet=True)
