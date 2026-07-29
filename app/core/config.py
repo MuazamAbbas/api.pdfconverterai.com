@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     # `app/services/files/service.py::save_uploaded_file` before a file is
     # fully buffered into memory.
     max_upload_size_mb: int = 25
+    # Downloaders module (Handbook Part C.3, ADR-015: downloaders folds into
+    # the web_tools module). Log destination for `app/routers/downloaders.py`'s
+    # module-level logging setup, same convention as the other path settings.
+    downloaders_log_path: str = (
+        "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"
+    )
+    # yt_dlp cookie file consumed by the worker-side downloaders_youtube
+    # Processor (Handbook Part C.4) so age/region-restricted videos resolve.
+    youtube_cookie_file: str = (
+        "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/app/config/cookies.txt"
+    )
 
     class Config:
         env_file = ".env"
