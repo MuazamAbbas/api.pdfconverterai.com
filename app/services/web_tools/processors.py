@@ -23,7 +23,11 @@ import os
 
 import aiohttp
 
-from app.services.jobs.processor import PermanentProcessingError, Processor, TransientProcessingError
+from app.services.jobs.processor import (
+    PermanentProcessingError,
+    Processor,
+    TransientProcessingError,
+)
 
 logger = logging.getLogger(__name__)
 

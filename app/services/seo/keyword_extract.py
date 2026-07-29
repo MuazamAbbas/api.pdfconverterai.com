@@ -1,5 +1,6 @@
-from rake_nltk import Rake
 import logging
+
+from rake_nltk import Rake
 
 logger = logging.getLogger(__name__)
 

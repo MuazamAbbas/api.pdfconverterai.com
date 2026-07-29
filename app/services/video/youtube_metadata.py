@@ -1,6 +1,7 @@
-import yt_dlp
 import logging
 from typing import Dict
+
+import yt_dlp
 
 logger = logging.getLogger(__name__)
 

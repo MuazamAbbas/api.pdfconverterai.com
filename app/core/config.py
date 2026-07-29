@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
     app_name: str = "PDFConverterAI"
     app_env: str = "production"

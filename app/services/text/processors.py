@@ -21,7 +21,11 @@ passed down through `Processor.run(job, file_doc, ctx)` ->
 import logging
 import os
 
-from app.services.jobs.processor import PermanentProcessingError, Processor, TransientProcessingError
+from app.services.jobs.processor import (
+    PermanentProcessingError,
+    Processor,
+    TransientProcessingError,
+)
 
 logger = logging.getLogger(__name__)
 
