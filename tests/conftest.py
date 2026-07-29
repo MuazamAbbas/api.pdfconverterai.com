@@ -38,6 +38,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
 from app.core.database import db
+from app.routers import downloaders as downloaders_router
 from app.routers import files as files_router
 from app.routers import image as image_router
 from app.routers import jobs as jobs_router
@@ -49,10 +50,11 @@ from app.routers import web_tools as web_tools_router
 def build_test_app() -> FastAPI:
     """Mirrors the router mounting + exception handlers from `app/main.py`
     for just the routers this task touched (`files`, `jobs`, `pdf`, `image`
-    for the OCR-via-Job-System reconciliation work, and now `text`/
-    `web_tools` for the text/web_tools Job System HTTP test suite), without
-    any of the startup-time model preloading / unrelated routers that make
-    the real `app.main` unimportable in this environment."""
+    for the OCR-via-Job-System reconciliation work, `text`/`web_tools` for
+    the text/web_tools Job System HTTP test suite, and now `downloaders` for
+    the downloaders/youtube Job System reconciliation), without any of the
+    startup-time model preloading / unrelated routers that make the real
+    `app.main` unimportable in this environment."""
     app = FastAPI()
     app.include_router(files_router.router, prefix="/v1")
     app.include_router(jobs_router.router, prefix="/v1")
@@ -60,6 +62,7 @@ def build_test_app() -> FastAPI:
     app.include_router(image_router.router, prefix="/v1")
     app.include_router(text_router.router, prefix="/v1")
     app.include_router(web_tools_router.router, prefix="/v1")
+    app.include_router(downloaders_router.router, prefix="/v1")
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
