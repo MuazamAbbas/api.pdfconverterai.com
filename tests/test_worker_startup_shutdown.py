@@ -35,6 +35,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from arq.worker import Function
 
 import app.worker as worker
 
@@ -50,12 +51,24 @@ def _install_fake_transformers_module(monkeypatch, pipeline_fn):
 def test_worker_settings_wires_on_startup_and_on_shutdown_hooks():
     """Purely structural: `WorkerSettings` (what `arq app.worker.WorkerSettings`
     actually reads) must reference the same `on_startup`/`on_shutdown`
-    functions this module defines, and register all four job task functions -
+    functions this module defines, and register every job task function -
     catches the class body drifting out of sync with the module-level
-    functions without needing to run anything."""
+    functions without needing to run anything.
+
+    `downloaders_youtube` is registered via `func(downloaders_youtube,
+    timeout=600)` rather than as a plain callable like the others (Handbook
+    Part C.4 - see `app/worker.py`'s `WorkerSettings.functions` comment, and
+    `tests/test_downloaders_worker_config.py` for a dedicated test of that
+    600s override actually taking effect) - so it shows up here as an
+    `arq.worker.Function` wrapper rather than the bare function object; unwrap
+    it via `.coroutine` to confirm it still references the same task
+    function.
+    """
     assert worker.WorkerSettings.on_startup is worker.on_startup
     assert worker.WorkerSettings.on_shutdown is worker.on_shutdown
-    assert worker.WorkerSettings.functions == [
+
+    functions = worker.WorkerSettings.functions
+    assert functions[:7] == [
         worker.pdf_convert,
         worker.pdf_to_word,
         worker.pdf_summarize,
@@ -64,6 +77,13 @@ def test_worker_settings_wires_on_startup_and_on_shutdown_hooks():
         worker.text_summarize,
         worker.web_tools_summarize,
     ]
+    assert len(functions) == 8
+
+    downloaders_entry = functions[7]
+    assert isinstance(downloaders_entry, Function)
+    assert downloaders_entry.coroutine is worker.downloaders_youtube
+    assert downloaders_entry.timeout_s == 600
+
     assert worker.WorkerSettings.max_tries == worker.MAX_TRIES
 
 
