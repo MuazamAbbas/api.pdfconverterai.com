@@ -127,7 +127,16 @@ class DownloadersYoutubeProcessor(Processor):
                 # plugin's own default (127.0.0.1:4416, auto-detected) -
                 # set explicitly anyway so a future non-default port/host
                 # doesn't silently fall back to no PO Token provider.
-                "youtubepot_bgutilhttp": {"base_url": [settings.bgutil_pot_provider_url]},
+                # Real key is hyphenated ("youtubepot-bgutilhttp") - yt_dlp's
+                # extractor_args IE-key lookup does NOT normalize hyphens to
+                # underscores when passed via the Python API (only the CLI
+                # string parser does, and only for values within an IE's
+                # args, not the IE key itself) - confirmed against
+                # `BgUtilHTTPPTP.PROVIDER_KEY` and yt_dlp's PO-token
+                # director (`youtubepot-{provider.PROVIDER_KEY.lower()}`).
+                # An earlier underscored version of this key was a silent
+                # no-op, caught by code review before merge.
+                "youtubepot-bgutilhttp": {"base_url": [settings.bgutil_pot_provider_url]},
             },
         }
         # Only pass a cookiefile if it actually exists on disk - yt_dlp
