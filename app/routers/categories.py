@@ -2,17 +2,8 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from app.core.config import settings
 from app.core.security import verify_api_key
 
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/categories", tags=["categories"])

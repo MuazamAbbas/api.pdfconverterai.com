@@ -2,7 +2,6 @@ import logging
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 
-from app.core.config import settings
 from app.core.security import verify_api_key
 from app.models.calculators import (
     AgeCalculatorRequest,
@@ -17,14 +16,6 @@ from app.services.calculators.financial_plan import FinancialPlanCalculator
 from app.services.calculators.loan import calculate_loan
 from app.services.calculators.percentage import calculate_percentage
 
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/calculators", tags=["Calculators"])
