@@ -3,19 +3,10 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.core.config import settings
 from app.core.security import verify_api_key
 from app.services.seo.keyword_density import keyword_density
 from app.services.seo.keyword_extract import extract_keywords_service
 
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/seo_tools", tags=["SEO Tools"])

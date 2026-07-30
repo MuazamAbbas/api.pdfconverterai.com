@@ -2,19 +2,10 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.config import settings
 from app.core.security import verify_api_key
 from app.models.unit_converters import ContextualConvertRequest, LengthConvertRequest
 from app.services.unit_converters.contextual_convert import contextual_convert
 
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/unit_converters", tags=["Unit Converters"])
