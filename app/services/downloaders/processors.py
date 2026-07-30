@@ -114,6 +114,21 @@ class DownloadersYoutubeProcessor(Processor):
             # one-job-one-output-file assumption, so restrict to a single
             # video even if the URL happens to resolve to a playlist entry.
             "noplaylist": True,
+            # Force the `web` player client explicitly (Handbook/
+            # SPRINT_STATUS.md 2026-07-30 finding): yt_dlp's default client
+            # priority (android_vr, web_safari, ...) still hit YouTube's
+            # "Sign in to confirm you're not a bot" IP-reputation check on
+            # this VPS even with a PO Token provider configured below -
+            # `web` was the one client verified working end-to-end in that
+            # investigation, alongside the PO Token + JS runtime settings.
+            "extractor_args": {
+                "youtube": {"player_client": ["web"]},
+                # Only needed if `bgutil_pot_provider_url` isn't the
+                # plugin's own default (127.0.0.1:4416, auto-detected) -
+                # set explicitly anyway so a future non-default port/host
+                # doesn't silently fall back to no PO Token provider.
+                "youtubepot_bgutilhttp": {"base_url": [settings.bgutil_pot_provider_url]},
+            },
         }
         # Only pass a cookiefile if it actually exists on disk - yt_dlp
         # raises at YoutubeDL init time if a configured cookiefile path is
@@ -125,6 +140,22 @@ class DownloadersYoutubeProcessor(Processor):
             logger.debug(
                 "youtube_cookie_file %s not found - proceeding without cookies",
                 settings.youtube_cookie_file,
+            )
+        # Only enable the `node` JS runtime (needed by the `yt-dlp-ejs`
+        # package to solve YouTube's signature/n-parameter challenges for
+        # the `web` client) if the configured Node.js binary actually
+        # exists - local/dev environments won't have the dedicated /opt
+        # install this VPS uses. Without this, `web` client extraction
+        # still runs but silently loses some formats (see the "Signature
+        # solving failed" warning found during investigation) rather than
+        # hard-failing, so this is a best-effort enhancement, not a
+        # hard requirement the way cookiefile/PO-Token-provider are.
+        if os.path.exists(settings.youtube_js_runtime_node_path):
+            ydl_opts["js_runtimes"] = {"node": {"path": settings.youtube_js_runtime_node_path}}
+        else:
+            logger.debug(
+                "youtube_js_runtime_node_path %s not found - proceeding without a JS runtime",
+                settings.youtube_js_runtime_node_path,
             )
 
         # yt_dlp is a synchronous/blocking library, called directly here

@@ -32,6 +32,23 @@ class Settings(BaseSettings):
     youtube_cookie_file: str = (
         "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/app/config/cookies.txt"
     )
+    # Node.js binary used by yt_dlp's `js_runtimes` option (via the
+    # `yt-dlp-ejs` package) to solve YouTube's signature/n-parameter
+    # challenges for the `web` player client - required, alongside the
+    # `bgutil-ytdlp-pot-provider` PO Token server (`bgutil_pot_provider_url`
+    # below), to get past YouTube's "Sign in to confirm you're not a bot"
+    # IP-reputation check on this VPS (SPRINT_STATUS.md, 2026-07-30 finding).
+    # A dedicated tarball install under /opt, not the system Node.js (Ubuntu
+    # 24.04's apt package is 18.x; yt-dlp-ejs requires 22+).
+    youtube_js_runtime_node_path: str = "/opt/nodejs/bin/node"
+    # HTTP base URL of the bgutil-ytdlp-pot-provider companion service
+    # (systemd unit `bgutil-pot.service`, mirroring `arq-worker.service`'s
+    # shape) that generates PO Tokens for yt_dlp. Only needs setting here if
+    # it's not on the default `127.0.0.1:4416` the plugin auto-detects -
+    # kept as an explicit setting anyway (not relied on implicitly) so a
+    # future non-default port/host doesn't silently fall back to no PO Token
+    # provider at all.
+    bgutil_pot_provider_url: str = "http://127.0.0.1:4416"
 
     class Config:
         env_file = ".env"
