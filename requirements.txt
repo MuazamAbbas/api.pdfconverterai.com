@@ -396,5 +396,5 @@ wrapt==1.17.3
     #   deprecated
 yarl==1.24.5
     # via aiohttp
-yt-dlp==2025.12.8
+yt-dlp==2026.7.4
     # via pdfconverterai-api (pyproject.toml)
