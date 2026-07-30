@@ -30,13 +30,26 @@ process that just needs `WorkerSettings`.
 import logging
 import os
 
-from arq import Retry, func
-from arq.connections import RedisSettings
+from app.core.logging import setup_logging
 
-from app.core.config import settings
-from app.services.files.service import get_file_by_id, save_output_file
-from app.services.jobs.processor import PermanentProcessingError, TransientProcessingError
-from app.services.jobs.service import (
+# Must run before any other import below. `arq`'s CLI (arq/cli.py) imports
+# this module *then* calls `logging.config.dictConfig(...)` itself - that
+# dictConfig only ever adds a handler to the 'arq' logger namespace, so
+# without this call the worker process's own `app.*` loggers (job
+# completed/retrying/failed - see `_run_job` below) would have no handler
+# on the root logger at all, same fragility this fixes in app/main.py.
+setup_logging()
+
+from arq import Retry, func  # noqa: E402
+from arq.connections import RedisSettings  # noqa: E402
+
+from app.core.config import settings  # noqa: E402
+from app.services.files.service import get_file_by_id, save_output_file  # noqa: E402
+from app.services.jobs.processor import (  # noqa: E402
+    PermanentProcessingError,
+    TransientProcessingError,
+)
+from app.services.jobs.service import (  # noqa: E402
     get_job,
     increment_retry_count,
     mark_completed,

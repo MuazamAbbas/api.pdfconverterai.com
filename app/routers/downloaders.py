@@ -4,20 +4,11 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
-from app.core.config import settings
 from app.core.security import verify_api_key
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
 from app.services.jobs.service import create_job, mark_failed, mark_queued
 from app.shared.responses import api_error, envelope
 
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(settings.downloaders_log_path),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/downloaders", tags=["Downloaders"])

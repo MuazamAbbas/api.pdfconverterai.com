@@ -5,7 +5,6 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from app.core.config import settings
 from app.core.security import verify_api_key
 from app.models.text import GrammarResponse, TextRequest, TextResponse
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
@@ -14,14 +13,6 @@ from app.services.text.count import char_count, paragraph_count, sentence_count,
 from app.services.text.grammar import correct_grammar
 from app.shared.responses import api_error, envelope
 
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/text", tags=["Text Tools"])
