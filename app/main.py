@@ -1,22 +1,29 @@
 import logging
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from arq.connections import RedisSettings, create_pool
-from fastapi import Depends, FastAPI, Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from transformers import pipeline
+from app.core.logging import setup_logging
 
-from app.core.config import settings
-from app.core.database import ensure_indexes
-from app.core.security import verify_api_key
-from app.core.storage import cleanup_expired_files
-from app.routers import (
+# Must run before any router/service import below - those modules call
+# `logging.getLogger(__name__)` at import time, and whichever handler setup
+# runs first used to silently win over the rest (see app/core/logging.py).
+setup_logging()
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
+from arq.connections import RedisSettings, create_pool  # noqa: E402
+from fastapi import Depends, FastAPI, Request  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+from slowapi import Limiter, _rate_limit_exceeded_handler  # noqa: E402
+from slowapi.errors import RateLimitExceeded  # noqa: E402
+from slowapi.util import get_remote_address  # noqa: E402
+from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
+from transformers import pipeline  # noqa: E402
+
+from app.core.config import settings  # noqa: E402
+from app.core.database import ensure_indexes  # noqa: E402
+from app.core.security import verify_api_key  # noqa: E402
+from app.core.storage import cleanup_expired_files  # noqa: E402
+from app.routers import (  # noqa: E402
     ai_tools,
     binary_tools,
     calculators,
@@ -36,15 +43,6 @@ from app.routers import (
     web_tools,
 )
 
-# Logging setup
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(

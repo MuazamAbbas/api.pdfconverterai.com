@@ -21,9 +21,11 @@ class Settings(BaseSettings):
     # `app/services/files/service.py::save_uploaded_file` before a file is
     # fully buffered into memory.
     max_upload_size_mb: int = 25
-    # Downloaders module (Handbook Part C.3, ADR-015: downloaders folds into
-    # the web_tools module). Log destination for `app/routers/downloaders.py`'s
-    # module-level logging setup, same convention as the other path settings.
+    # Shared error.log destination, consumed by `app.core.logging.setup_logging()`
+    # (called once from `app/main.py`). Named `downloaders_log_path` from its
+    # original introduction alongside the downloaders module (Handbook Part
+    # C.3, ADR-015); kept as-is rather than renamed to avoid churning that
+    # ADR and SPRINT_STATUS.md's existing references to this field.
     downloaders_log_path: str = (
         "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"
     )
