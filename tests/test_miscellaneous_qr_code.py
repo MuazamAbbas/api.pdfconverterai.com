@@ -60,8 +60,8 @@ async def test_qr_code_accepts_each_valid_error_correction_level(client, api_key
 
 
 async def test_qr_code_custom_size_produces_a_larger_image_than_default(client, api_key):
-    """`size` maps to `box_size = max(1, size // 30)` (see
-    `app/routers/miscellaneous.py::generate_qr_code`), so a much larger
+    """`size` maps to `box_size` derived from the QR's actual module count
+    (see `app/routers/miscellaneous.py::generate_qr_code`), so a much larger
     requested `size` should produce a visibly larger PNG for the same text -
     not an exact pixel match (module/version count also affects the final
     dimensions), just a strictly bigger image."""
@@ -82,6 +82,80 @@ async def test_qr_code_custom_size_produces_a_larger_image_than_default(client, 
     large_image = _assert_valid_png(large_resp.content)
     assert large_image.width > default_image.width
     assert large_image.height > default_image.height
+
+
+async def test_qr_code_capacity_overflow_returns_400_not_500(client, api_key):
+    """At `error_correction="H"`, 2000 chars (the max `text` length allowed
+    by `QRCodeRequest`) exceeds every QR version's (1-40) capacity, so
+    `qr.make(fit=True)` raises a bare `ValueError` internally
+    (`app/routers/miscellaneous.py::generate_qr_code`). The fix catches that
+    and re-raises as a 400 with a clear, client-facing message - not the
+    generic 500 `unhandled_exception_handler` would otherwise produce for an
+    uncaught exception, and not a leak of the raw
+    `ValueError("Invalid version (was 41, expected 1 to 40)")` message or
+    any other exception-implementation detail (type name, traceback, file
+    path)."""
+    resp = await client.post(
+        "/v1/miscellaneous/qr_code",
+        json={"text": "x" * 2000, "error_correction": "H"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+    message = body["message"]
+    assert "too long to encode" in message
+    assert "error correction level" in message
+    # Must not leak the underlying library's raw exception/implementation
+    # details (Handbook Part C.10 - never leak a stack trace).
+    assert "ValueError" not in message
+    assert "Invalid version" not in message
+    assert "Traceback" not in message
+    assert ".py" not in message
+
+
+async def test_qr_code_size_tracks_requested_size_after_box_size_fix(client, api_key):
+    """Before the fix, `box_size` was computed as a fixed `size // 30`
+    regardless of the QR's actual module count, so a `size=1000` request
+    for text needing a large QR version could balloon the output to several
+    times the requested size. The fix derives `box_size` from
+    `qr.modules_count` (set by `qr.make(fit=True)`) instead, so the output
+    PNG should land close to the requested `size` - not exactly `size`
+    (integer module-count division still applies), but within one module's
+    worth of pixels of it, and nowhere near the old ballooned dimensions."""
+    text = "x" * 2000
+    size = 1000
+    resp = await client.post(
+        "/v1/miscellaneous/qr_code",
+        json={"text": text, "size": size, "error_correction": "L"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    image = _assert_valid_png(resp.content)
+
+    # Reproduce the fix's own box_size math against the real `qrcode`
+    # library for this exact (text, error_correction, size) combination to
+    # get a precise expected dimension, rather than hardcoding a guessed
+    # pixel count.
+    import qrcode as _qrcode
+
+    qr = _qrcode.QRCode(error_correction=_qrcode.constants.ERROR_CORRECT_L, border=4)
+    qr.add_data(text)
+    qr.make(fit=True)
+    total_modules = qr.modules_count + 2 * qr.border
+    expected_box_size = max(1, size // total_modules)
+    expected_dim = total_modules * expected_box_size
+
+    assert image.width == expected_dim
+    assert image.height == expected_dim
+    # Sanity bounds: within one module's worth of pixels of the requested
+    # size (integer division can only undershoot, never overshoot by more
+    # than that), and nowhere near the old size // 30 box_size ballooning
+    # (which produced roughly 5x the requested size for this input).
+    assert abs(image.width - size) <= total_modules
+    assert image.width < size * 1.5
 
 
 @pytest.mark.parametrize(
