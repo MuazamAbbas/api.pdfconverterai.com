@@ -62,7 +62,7 @@ def build_test_app() -> FastAPI:
     startup-time model preloading / unrelated routers that make the real
     `app.main` unimportable in this environment, and now `unit_converters`
     for the length-converter test suite - also a Tier 1 sync endpoint, no
-    Job System plumbing needed, just the router mount itself)."""
+    Job System plumbing needed, just the router mount itself."""
     app = FastAPI()
     app.include_router(files_router.router, prefix="/v1")
     app.include_router(jobs_router.router, prefix="/v1")
