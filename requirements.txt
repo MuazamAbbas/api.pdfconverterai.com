@@ -269,6 +269,8 @@ pyyaml==6.0.3
     #   pdfconverterai-api (pyproject.toml)
     #   huggingface-hub
     #   transformers
+qrcode==8.2
+    # via pdfconverterai-api (pyproject.toml)
 rake-nltk==1.0.6
     # via pdfconverterai-api (pyproject.toml)
 redis==5.3.1
