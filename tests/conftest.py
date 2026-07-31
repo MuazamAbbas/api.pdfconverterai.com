@@ -45,6 +45,7 @@ from app.routers import jobs as jobs_router
 from app.routers import miscellaneous as miscellaneous_router
 from app.routers import pdf as pdf_router
 from app.routers import text as text_router
+from app.routers import unit_converters as unit_converters_router
 from app.routers import web_tools as web_tools_router
 
 
@@ -59,7 +60,9 @@ def build_test_app() -> FastAPI:
     so it needs no Job System plumbing, just the router mount itself),
     without any of the
     startup-time model preloading / unrelated routers that make the real
-    `app.main` unimportable in this environment."""
+    `app.main` unimportable in this environment, and now `unit_converters`
+    for the length-converter test suite - also a Tier 1 sync endpoint, no
+    Job System plumbing needed, just the router mount itself."""
     app = FastAPI()
     app.include_router(files_router.router, prefix="/v1")
     app.include_router(jobs_router.router, prefix="/v1")
@@ -69,6 +72,7 @@ def build_test_app() -> FastAPI:
     app.include_router(text_router.router, prefix="/v1")
     app.include_router(web_tools_router.router, prefix="/v1")
     app.include_router(downloaders_router.router, prefix="/v1")
+    app.include_router(unit_converters_router.router, prefix="/v1")
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):

@@ -1,0 +1,177 @@
+"""Coverage for `POST /v1/unit_converters/length` (Handbook Part I.2 - Tier 1,
+no job queue, plain sync endpoint), plus its unit-validation and
+`verify_api_key` auth behavior.
+
+`GET /v1/unit_converters/test` is also covered as a smoke check that the
+router mount itself still works.
+
+`POST /v1/unit_converters/convert` (the NLP/contextual endpoint) is
+intentionally out of scope - untouched this session.
+
+Against the real `unit_converters` router (mounted in
+`tests/conftest.py::build_test_app`) and real Mongo (via the `api_key`
+fixture) - no mocking of `verify_api_key`, matching the rest of this test
+suite's convention (see `tests/test_miscellaneous_qr_code.py`) of exercising
+the real dependency against a real, fixture-created API key document rather
+than overriding it.
+
+Expected `result` values below are computed/measured, not loose tolerances,
+per this repo's established testing standard - each is either an exact
+real-world unit-conversion identity (1 mile = 1609.344 meters, 1 yard = 3
+feet, 1 mile = 5280 feet, 1 foot = 12 inches, 1 kilometer = 1000 meters) or
+independently computed from the router's own
+`result = value * units[from_unit] / units[to_unit]` formula rounded to 4
+decimal places (see `app/routers/unit_converters.py::convert_length`).
+"""
+import pytest
+
+# See tests/test_worker_retry.py's module docstring/comment for why this is
+# pinned to the session-scoped loop (Motor's shared `app.core.database.db`
+# client).
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+async def test_unit_converters_health_check_still_returns_200(client, api_key):
+    resp = await client.get(
+        "/v1/unit_converters/test",
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"message": "Unit Converters router is working"}
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 meter = 100 centimeters.
+        pytest.param(1, "meter", "centimeter", 100.0, id="meter_to_centimeter"),
+        # 100 centimeters = 1 meter (inverse of the above).
+        pytest.param(100, "centimeter", "meter", 1.0, id="centimeter_to_meter"),
+        # 1 kilometer = 1000 meters.
+        pytest.param(1, "kilometer", "meter", 1000.0, id="kilometer_to_meter"),
+        # 1 mile = 1609.344 meters (exact, by definition of the router's own
+        # constant).
+        pytest.param(1, "mile", "meter", 1609.344, id="mile_to_meter"),
+        # 1 mile = 5280 feet (1609.344 / 0.3048 == 5280.0 exactly).
+        pytest.param(1, "mile", "foot", 5280.0, id="mile_to_foot"),
+        # 1 mile = 1760 yards (1609.344 / 0.9144 == 1760.0 exactly).
+        pytest.param(1, "mile", "yard", 1760.0, id="mile_to_yard"),
+        # 1 yard = 3 feet (0.9144 / 0.3048 == 3.0 exactly).
+        pytest.param(1, "yard", "foot", 3.0, id="yard_to_foot"),
+        # 1 foot = 12 inches (0.3048 / 0.0254 == 12.0 exactly).
+        pytest.param(1, "foot", "inch", 12.0, id="foot_to_inch"),
+        # 1 inch = 2.54 centimeters (0.0254 / 0.01 == 2.54 exactly).
+        pytest.param(1, "inch", "centimeter", 2.54, id="inch_to_centimeter"),
+        # 1 meter = 3.2808 feet (1 / 0.3048 == 3.280839895..., rounded to 4dp
+        # per the router's own `round(result, 4)`).
+        pytest.param(1, "meter", "foot", 3.2808, id="meter_to_foot_rounded"),
+    ],
+)
+async def test_length_conversion_round_trips_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/length",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["meter", "foot", "inch", "kilometer", "centimeter", "mile", "yard"],
+)
+async def test_all_seven_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 7
+    units as both a valid `from_unit` and a valid `to_unit` cheaply: any
+    unit not in the router's `units` dict would 400 with "Invalid unit"
+    instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/length",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/length",
+        json={"value": 1, "from_unit": "parsec", "to_unit": "meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/length",
+        json={"value": 1, "from_unit": "meter", "to_unit": "parsec"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_missing_value_field_rejected_with_422(client, api_key):
+    """`LengthConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/length",
+        json={"from_unit": "meter", "to_unit": "foot"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_invalid_api_key_value_rejected_with_envelope(client):
+    """Mirrors
+    `tests/test_miscellaneous_qr_code.py::test_qr_code_invalid_api_key_value_rejected_with_envelope`
+    - a structurally present but unrecognized `X-API-Key` fails inside
+    `verify_api_key` itself (`db.api_keys.find_one` returns nothing), which
+    is a 403, not a 422."""
+    resp = await client.post(
+        "/v1/unit_converters/length",
+        json={"value": 1, "from_unit": "meter", "to_unit": "foot"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_missing_api_key_header_rejected(client):
+    """Mirrors
+    `tests/test_miscellaneous_qr_code.py::test_qr_code_missing_api_key_header_rejected`
+    - a structurally missing `X-API-Key` header fails FastAPI's own
+    `Header(...)` requirement (a `RequestValidationError`), so it's a 422
+    with the same envelope as an invalid request body, not `verify_api_key`'s
+    403 (its function body never runs since the header parameter itself
+    fails to resolve)."""
+    resp = await client.post(
+        "/v1/unit_converters/length",
+        json={"value": 1, "from_unit": "meter", "to_unit": "foot"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
