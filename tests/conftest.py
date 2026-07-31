@@ -42,6 +42,7 @@ from app.routers import downloaders as downloaders_router
 from app.routers import files as files_router
 from app.routers import image as image_router
 from app.routers import jobs as jobs_router
+from app.routers import miscellaneous as miscellaneous_router
 from app.routers import pdf as pdf_router
 from app.routers import text as text_router
 from app.routers import web_tools as web_tools_router
@@ -51,13 +52,18 @@ def build_test_app() -> FastAPI:
     """Mirrors the router mounting + exception handlers from `app/main.py`
     for just the routers this task touched (`files`, `jobs`, `pdf`, `image`
     for the OCR-via-Job-System reconciliation work, `text`/`web_tools` for
-    the text/web_tools Job System HTTP test suite, and now `downloaders` for
-    the downloaders/youtube Job System reconciliation), without any of the
+    the text/web_tools Job System HTTP test suite, `downloaders` for
+    the downloaders/youtube Job System reconciliation, and now
+    `miscellaneous` for the QR code generator endpoint test suite -
+    it's a Tier 1 sync endpoint like the module's existing `/timestamp`,
+    so it needs no Job System plumbing, just the router mount itself),
+    without any of the
     startup-time model preloading / unrelated routers that make the real
     `app.main` unimportable in this environment."""
     app = FastAPI()
     app.include_router(files_router.router, prefix="/v1")
     app.include_router(jobs_router.router, prefix="/v1")
+    app.include_router(miscellaneous_router.router, prefix="/v1")
     app.include_router(pdf_router.router, prefix="/v1")
     app.include_router(image_router.router, prefix="/v1")
     app.include_router(text_router.router, prefix="/v1")
