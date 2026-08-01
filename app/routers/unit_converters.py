@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import verify_api_key
 from app.models.unit_converters import (
+    AreaConvertRequest,
     ContextualConvertRequest,
     LengthConvertRequest,
     TemperatureConvertRequest,
@@ -117,6 +118,32 @@ async def convert_weight(request: WeightConvertRequest, api_key: dict = Depends(
     except Exception as e:
         logger.exception("💥 Error converting weight: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error converting weight: {str(e)}")
+
+@router.post("/area", summary="Convert area between units")
+async def convert_area(request: AreaConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting area: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "square_meter": 1.0,  # Base unit
+        "square_kilometer": 1_000_000.0,  # 1 square kilometer = 1,000,000 square meters
+        "square_foot": 0.09290304,  # 1 square foot = 0.09290304 square meters
+        "square_yard": 0.83612736,  # 1 square yard = 0.83612736 square meters
+        "acre": 4046.8564224  # 1 acre = 4046.8564224 square meters
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting area: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting area: {str(e)}")
 
 @router.post("/convert", summary="Convert units using natural language query")
 async def contextual_convert_endpoint(request: ContextualConvertRequest, api_key: dict = Depends(verify_api_key)):

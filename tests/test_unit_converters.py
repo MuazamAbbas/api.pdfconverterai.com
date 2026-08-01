@@ -1,6 +1,7 @@
 """Coverage for `POST /v1/unit_converters/length`,
-`POST /v1/unit_converters/temperature`, and
-`POST /v1/unit_converters/weight` (Handbook Part I.2 - Tier 1, no job
+`POST /v1/unit_converters/temperature`,
+`POST /v1/unit_converters/weight`, and
+`POST /v1/unit_converters/area` (Handbook Part I.2 - Tier 1, no job
 queue, plain sync endpoints), plus their unit-validation and
 `verify_api_key` auth behavior.
 
@@ -40,6 +41,15 @@ kilogram (base, 1.0), gram (0.001), pound (0.45359237), ounce
 (0.028349523125). Expected values below are computed from that same
 `result = value * units[from_unit] / units[to_unit]` formula, rounded to 4
 decimal places.
+
+Area IS also a multiplier-through-origin conversion like length/weight (see
+`convert_area`'s own `units` dict/formula) - exactly 5 units: square_meter
+(base, 1.0), square_kilometer (1_000_000.0), square_foot (0.09290304),
+square_yard (0.83612736), acre (4046.8564224). Expected values below are
+either exact real-world identities (1 acre = 43560 square feet, 1 square
+yard = 9 square feet, since a yard is 3 feet on a side) or independently
+computed from that same `result = value * units[from_unit] /
+units[to_unit]` formula, rounded to 4 decimal places.
 """
 import pytest
 
@@ -675,3 +685,195 @@ async def test_weight_round_trip_gram_to_ounce_to_gram_returns_approximately_ori
     final = second.json()["result"]
     assert final == pytest.approx(250.0, abs=1e-2)
     assert final != 250.0
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 4046.8564224 square meters = 1 acre (exact, by definition of the
+        # router's own `acre` constant).
+        pytest.param(
+            4046.8564224, "square_meter", "acre", 1.0, id="square_meter_to_acre"
+        ),
+        # 1 acre = 4046.8564 square meters (4046.8564224 rounded to 4dp).
+        pytest.param(1, "acre", "square_meter", 4046.8564, id="acre_to_square_meter"),
+        # 9 square feet = 1 square yard (a yard is 3 feet on a side, so
+        # 3^2 == 9 exactly: 0.83612736 / 0.09290304 == 9.0 exactly).
+        pytest.param(9, "square_foot", "square_yard", 1.0, id="square_foot_to_square_yard"),
+        # 1 square yard = 9 square feet (inverse of the above).
+        pytest.param(1, "square_yard", "square_foot", 9.0, id="square_yard_to_square_foot"),
+        # 5 square kilometers = 5,000,000 square meters (1,000,000 * 5
+        # exactly).
+        pytest.param(
+            5, "square_kilometer", "square_meter", 5_000_000.0, id="square_km_to_square_meter"
+        ),
+        # 2,500,000 square meters = 2.5 square kilometers (inverse of the
+        # above).
+        pytest.param(
+            2_500_000, "square_meter", "square_kilometer", 2.5, id="square_meter_to_square_km"
+        ),
+        # 10 square meters = 107.6391 square feet (10 / 0.09290304 ==
+        # 107.63910416..., rounded to 4dp).
+        pytest.param(
+            10, "square_meter", "square_foot", 107.6391, id="square_meter_to_square_foot_rounded"
+        ),
+        # 1 acre = 43,560 square feet, so 43,560 square feet = 1 acre exactly
+        # (a well-known real-world identity, also exact from the router's
+        # own constants: 43560 * 0.09290304 / 4046.8564224 == 1.0).
+        pytest.param(43_560, "square_foot", "acre", 1.0, id="square_foot_to_acre"),
+        # 2 acres = 87,120 square feet (inverse of the above, doubled).
+        pytest.param(2, "acre", "square_foot", 87_120.0, id="acre_to_square_foot"),
+        # 1 square kilometer = 247.1054 acres (1,000,000 / 4046.8564224 ==
+        # 247.10538..., rounded to 4dp).
+        pytest.param(1, "square_kilometer", "acre", 247.1054, id="square_kilometer_to_acre"),
+    ],
+)
+async def test_area_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["square_meter", "square_kilometer", "square_foot", "square_yard", "acre"],
+)
+async def test_all_five_area_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 5
+    area units as both a valid `from_unit` and a valid `to_unit` cheaply:
+    any unit not in the router's `units` dict would 400 with "Invalid unit"
+    instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_area_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": 1, "from_unit": "hectare", "to_unit": "square_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_area_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": 1, "from_unit": "square_meter", "to_unit": "hectare"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_area_missing_value_field_rejected_with_422(client, api_key):
+    """`AreaConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"from_unit": "square_meter", "to_unit": "square_foot"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_area_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": 1, "to_unit": "square_foot"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_area_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": 1, "from_unit": "square_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_area_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": 1, "from_unit": "square_meter", "to_unit": "square_foot"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_area_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": 1, "from_unit": "square_meter", "to_unit": "square_foot"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_area_round_trip_square_meter_to_square_foot_to_square_meter_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover the original
+    value. Independently verified: 10 / 0.09290304 == 107.63910416...,
+    which the router rounds to 4dp (107.6391); converting 107.6391 back
+    (107.6391 * 0.09290304 == 9.99999977..., rounded to 10.0) recovers the
+    exact original here - the assertion below still uses a tolerance rather
+    than depending on that coincidence, mirroring the weight round-trip
+    tests above."""
+    first = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": 10, "from_unit": "square_meter", "to_unit": "square_foot"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 107.6391
+
+    second = await client.post(
+        "/v1/unit_converters/area",
+        json={"value": intermediate, "from_unit": "square_foot", "to_unit": "square_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
