@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class LengthConvertRequest(BaseModel):
@@ -83,6 +83,18 @@ class FlowRateConvertRequest(BaseModel):
 
 class AngleConvertRequest(BaseModel):
     value: float
+    from_unit: str
+    to_unit: str
+
+class FuelEfficiencyConvertRequest(BaseModel):
+    # `allow_inf_nan=False` rejects `inf`/`nan` (including JSON's
+    # non-standard bare `Infinity`/`-Infinity`/`NaN` tokens and float
+    # overflow like `1e400`) at request-validation time with a clean 422,
+    # before the handler's `value == 0` zero-guards ever run - `inf == 0`
+    # and `nan == 0` are both `False`, so without this constraint such a
+    # value would sail past those guards and fail later at response
+    # serialization with a generic 500 instead.
+    value: float = Field(allow_inf_nan=False)
     from_unit: str
     to_unit: str
 

@@ -13,9 +13,10 @@
 `POST /v1/unit_converters/force`,
 `POST /v1/unit_converters/torque`,
 `POST /v1/unit_converters/density`,
-`POST /v1/unit_converters/flow_rate`, and
-`POST /v1/unit_converters/angle` (Handbook Part I.2 - Tier 1, no job
-queue, plain sync endpoints), plus their unit-validation and
+`POST /v1/unit_converters/flow_rate`,
+`POST /v1/unit_converters/angle`, and
+`POST /v1/unit_converters/fuel_efficiency` (Handbook Part I.2 - Tier 1, no
+job queue, plain sync endpoints), plus their unit-validation and
 `verify_api_key` auth behavior.
 
 `GET /v1/unit_converters/test` is also covered as a smoke check that the
@@ -123,6 +124,24 @@ to 4 decimal places, matching this file's established convention. Round-trip
 tests use `pytest.approx` (not exact equality) since not every unit pair's
 double-rounding cancels out cleanly at 4dp, mirroring the volume/area/weight
 round-trip tests above.
+
+Fuel efficiency (the 18th and final unit-converter sub-tool) is NOT a
+multiplier-through-origin conversion like the batches above - it is
+RECIPROCAL, mirroring temperature's affine from->base->to shape but with
+division instead of an offset (see `convert_fuel_efficiency` in
+`app/routers/unit_converters.py`). Three units: `mpg` (miles per US gallon),
+`km_per_liter` (base, direct multiplier `MPG_TO_KPL = 0.425143707`), and
+`l_per_100km` (reciprocal of km_per_liter: `100 / km_per_liter`, not a
+multiplier). Expected values below are independently computed from that
+same from->km_per_liter->to formula, rounded to 4 decimal places. Unlike
+every batch above, `from_unit == to_unit` is handled as an explicit
+identity short-circuit in the router (not a flat `units` dict divide-by-self),
+and a `value == 0` request on any leg that divides BY the input value
+(`l_per_100km` as `from_unit`, or any path landing on `l_per_100km` as
+`to_unit` after conversion to a zero `km_per_liter`) is caught and returns
+400 "Invalid value: cannot convert a value of zero for this unit" rather
+than a 500 or an `inf`/`nan` leaking into the JSON body - a genuinely new
+failure mode this suite has to cover that no earlier batch needed.
 """
 import pytest
 
@@ -3512,3 +3531,359 @@ async def test_angle_round_trip_degree_to_radian_to_degree_returns_approximately
     assert second.status_code == 200
     final = second.json()["result"]
     assert final == pytest.approx(10.0, abs=1e-2)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 30 mpg = 12.7543 km/L (30 * 0.425143707 == 12.75431121, rounded to
+        # 4dp per the router's own `round(result, 4)`).
+        pytest.param(30, "mpg", "km_per_liter", 12.7543, id="mpg_to_kpl"),
+        # 10 km/L = 23.5215 mpg (10 / 0.425143707 == 23.52145985..., rounded
+        # to 4dp).
+        pytest.param(10, "km_per_liter", "mpg", 23.5215, id="kpl_to_mpg"),
+        # 10 km/L = 10.0 L/100km (100 / 10 == 10.0 exactly - the reciprocal
+        # formula, not a multiplier).
+        pytest.param(10, "km_per_liter", "l_per_100km", 10.0, id="kpl_to_l100"),
+        # 8 L/100km = 12.5 km/L (100 / 8 == 12.5 exactly, inverse of the
+        # above reciprocal formula).
+        pytest.param(8, "l_per_100km", "km_per_liter", 12.5, id="l100_to_kpl"),
+        # 30 mpg = 7.8405 L/100km, composed through km_per_liter as the
+        # internal base: 100 / (30 * 0.425143707) == 7.84048..., rounded to
+        # 4dp.
+        pytest.param(30, "mpg", "l_per_100km", 7.8405, id="mpg_to_l100"),
+        # 8 L/100km = 29.4018 mpg, composed the other direction: 100 /
+        # (8 * 0.425143707) == 29.40179..., rounded to 4dp.
+        pytest.param(8, "l_per_100km", "mpg", 29.4018, id="l100_to_mpg"),
+    ],
+)
+async def test_fuel_efficiency_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize("unit", ["mpg", "km_per_liter", "l_per_100km"])
+async def test_all_three_fuel_efficiency_units_accepted_as_from_and_to_unit(
+    client, api_key, unit
+):
+    """Identity conversion (unit -> itself) exercises every one of the 3
+    fuel-efficiency units as both a valid `from_unit` and a valid `to_unit`
+    cheaply: any unit not in the router's `valid_units` set would 400 with
+    "Invalid unit" instead of returning a 200 with `result == value`. Unlike
+    every multiplier-through-origin batch above, this identity path is an
+    explicit `from_unit == to_unit` short-circuit in the handler (not a flat
+    `units` dict divide-by-self), since fuel efficiency's conversions are
+    reciprocal, not multiplicative."""
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_fuel_efficiency_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 1, "from_unit": "liters_per_mile", "to_unit": "mpg"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_fuel_efficiency_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 1, "from_unit": "mpg", "to_unit": "liters_per_mile"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_fuel_efficiency_missing_value_field_rejected_with_422(client, api_key):
+    """`FuelEfficiencyConvertRequest.value` has no default, so omitting it
+    entirely fails Pydantic validation before the handler body ever runs -
+    a 422, distinct from the handler's own 400 "Invalid unit"/zero-value
+    paths."""
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"from_unit": "mpg", "to_unit": "km_per_liter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_fuel_efficiency_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 1, "to_unit": "km_per_liter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_fuel_efficiency_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 1, "from_unit": "mpg"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_fuel_efficiency_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 1, "from_unit": "mpg", "to_unit": "km_per_liter"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_fuel_efficiency_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 1, "from_unit": "mpg", "to_unit": "km_per_liter"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_fuel_efficiency_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `FuelEfficiencyConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in valid_units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "mpg", "to_unit": "km_per_liter"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    ["Infinity", "-Infinity", "NaN", "1e400", "-1e400"],
+)
+async def test_fuel_efficiency_inf_nan_value_rejected_with_422_not_500(
+    client, api_key, raw_value
+):
+    """`FuelEfficiencyConvertRequest.value` now carries
+    `Field(allow_inf_nan=False)` - Pydantic rejects `inf`/`nan` at
+    request-validation time with a clean 422, before the handler's
+    `value == 0` zero-guards ever run. Those guards alone can't catch this:
+    `inf == 0` and `nan == 0` are both `False` in Python, so without the
+    `Field` constraint a crafted value sails past both explicit
+    `except ZeroDivisionError` branches (and the `from_unit == to_unit`
+    identity short-circuit) and reaches `round(result, 4)` with `inf`/`nan`,
+    which then fails at response-serialization time (Starlette's
+    `JSONResponse` calls `json.dumps(..., allow_nan=False)`) with a generic
+    500 instead of a 422.
+
+    Covers both JSON's non-standard bare `Infinity`/`-Infinity`/`NaN`
+    tokens (which Python's `json.loads` accepts even though they're not
+    valid standard JSON) and an ordinary decimal literal that overflows to
+    `inf` at parse time (`1e400`)."""
+    raw_body = (
+        '{"value": %s, "from_unit": "mpg", "to_unit": "mpg"}' % raw_value
+    ).encode()
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        content=raw_body,
+        headers={
+            "X-API-Key": api_key["key"],
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert "inf" not in resp.text.lower()
+    assert "nan" not in resp.text.lower()
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit",
+    [
+        # `l_per_100km` as `from_unit` divides directly by `request.value`
+        # (`km_per_liter = 100 / value`) - a value of exactly 0 hits that
+        # division before any unit-conversion math happens.
+        pytest.param(0, "l_per_100km", "mpg", id="zero_l100_to_mpg"),
+        pytest.param(0, "l_per_100km", "km_per_liter", id="zero_l100_to_kpl"),
+        # `km_per_liter` as `from_unit` with value 0 converts cleanly to an
+        # internal `km_per_liter` base of 0.0 (no division on that leg), but
+        # landing on `l_per_100km` as `to_unit` then divides BY that zero
+        # base (`100 / km_per_liter`), hitting the second division site.
+        pytest.param(0, "km_per_liter", "l_per_100km", id="zero_kpl_to_l100"),
+        # Same second-division-site case, but arriving at a zero
+        # `km_per_liter` base via `mpg` (`0 * MPG_TO_KPL == 0.0`) instead of
+        # directly.
+        pytest.param(0, "mpg", "l_per_100km", id="zero_mpg_to_l100"),
+    ],
+)
+async def test_fuel_efficiency_zero_value_on_divide_by_value_path_returns_400_not_500(
+    client, api_key, value, from_unit, to_unit
+):
+    """`convert_fuel_efficiency` is reciprocal, not multiplier-through-origin
+    - a `value` of 0 on any leg that divides BY that value (either the
+    initial `l_per_100km` `from_unit` conversion, or the second leg landing
+    on `l_per_100km` as `to_unit` after the first leg produces a zero
+    `km_per_liter` base) is caught explicitly and returns a clean 400, never
+    a 500 and never an `inf`/`nan` serialized into the JSON body (Python's
+    bare `100 / 0` raises `ZeroDivisionError`, which the handler catches
+    before it can propagate to the generic `except Exception` 500 path)."""
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid value: cannot convert a value of zero for this unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+    assert "inf" not in resp.text.lower()
+    assert "nan" not in resp.text.lower()
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # A 0 value on a leg that does NOT divide by the input (mpg/km_per_liter
+        # as `from_unit` multiply rather than divide) converts cleanly to
+        # 0.0 - no ZeroDivisionError, unlike the divide-by-value cases above.
+        pytest.param(0, "mpg", "km_per_liter", 0.0, id="zero_mpg_to_kpl"),
+        pytest.param(0, "km_per_liter", "mpg", 0.0, id="zero_kpl_to_mpg"),
+    ],
+)
+async def test_fuel_efficiency_zero_value_on_non_divide_by_value_path_returns_200(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == expected
+
+
+async def test_fuel_efficiency_identity_conversion_with_zero_value_returns_zero_unchanged(
+    client, api_key
+):
+    """`from_unit == to_unit` is an explicit short-circuit in the handler
+    that returns `request.value` unchanged before any reciprocal math runs
+    - so even `l_per_100km` -> `l_per_100km` (which would otherwise divide
+    BY the input value on the `from_unit` leg) returns 200 with `result ==
+    0.0`, not the 400 that a genuine cross-unit zero-value conversion would
+    hit (see
+    `test_fuel_efficiency_zero_value_on_divide_by_value_path_returns_400_not_500`'s
+    `zero_l100_to_mpg`/`zero_l100_to_kpl` cases)."""
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 0, "from_unit": "l_per_100km", "to_unit": "l_per_100km"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 0.0
+
+
+async def test_fuel_efficiency_round_trip_mpg_to_kpl_to_mpg_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover (approximately)
+    the original value. Independently verified: 30 * 0.425143707 ==
+    12.75431121, which the router rounds to 4dp (12.7543); converting
+    12.7543 back (12.7543 / 0.425143707 == 29.99998...) recovers the
+    original to within a small tolerance, mirroring the weight/area
+    round-trip tests above."""
+    first = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 30, "from_unit": "mpg", "to_unit": "km_per_liter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 12.7543
+
+    second = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": intermediate, "from_unit": "km_per_liter", "to_unit": "mpg"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(30.0, abs=1e-3)
+
+
+async def test_fuel_efficiency_round_trip_kpl_to_l100_to_kpl_returns_original(
+    client, api_key
+):
+    """Round trip through the genuinely reciprocal leg (`km_per_liter` <->
+    `l_per_100km`, both computed as `100 / value` in each direction):
+    10 km/L -> 10.0 L/100km -> 10.0 km/L recovers the original exactly here,
+    since `100 / 10 == 10.0` is exact in both directions with no rounding
+    error to accumulate."""
+    first = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": 10, "from_unit": "km_per_liter", "to_unit": "l_per_100km"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 10.0
+
+    second = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        json={"value": intermediate, "from_unit": "l_per_100km", "to_unit": "km_per_liter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
