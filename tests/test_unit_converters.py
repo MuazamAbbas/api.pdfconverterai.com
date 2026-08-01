@@ -1,7 +1,8 @@
 """Coverage for `POST /v1/unit_converters/length`,
 `POST /v1/unit_converters/temperature`,
-`POST /v1/unit_converters/weight`, and
-`POST /v1/unit_converters/area` (Handbook Part I.2 - Tier 1, no job
+`POST /v1/unit_converters/weight`,
+`POST /v1/unit_converters/area`, and
+`POST /v1/unit_converters/volume` (Handbook Part I.2 - Tier 1, no job
 queue, plain sync endpoints), plus their unit-validation and
 `verify_api_key` auth behavior.
 
@@ -50,6 +51,18 @@ either exact real-world identities (1 acre = 43560 square feet, 1 square
 yard = 9 square feet, since a yard is 3 feet on a side) or independently
 computed from that same `result = value * units[from_unit] /
 units[to_unit]` formula, rounded to 4 decimal places.
+
+Volume IS also a multiplier-through-origin conversion like length/weight/area
+(see `convert_volume`'s own `units` dict/formula) - exactly 5 units,
+confirmed live against v1's Volume Converter page dropdown (Liters,
+Milliliters, Cubic Meters, Gallons, Cubic Feet): liter (base, 1.0),
+milliliter (0.001), cubic_meter (1000.0), gallon (3.785411784 - US gallon,
+matching v1's stated "1 gal = 3.78541 L"), cubic_foot (28.316846592 - exact,
+derived from 0.3048**3 m^3). Expected values below are independently
+computed from that same `result = value * units[from_unit] /
+units[to_unit]` formula, rounded to 4 decimal places (no clean
+whole-number real-world identities exist between liter/gallon/cubic_foot
+the way they do for length/weight/area's unit pairs).
 """
 import pytest
 
@@ -872,6 +885,268 @@ async def test_area_round_trip_square_meter_to_square_foot_to_square_meter_retur
     second = await client.post(
         "/v1/unit_converters/area",
         json={"value": intermediate, "from_unit": "square_foot", "to_unit": "square_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 liter = 1000 milliliters (1 / 0.001 == 1000.0 exactly).
+        pytest.param(1, "liter", "milliliter", 1000.0, id="liter_to_milliliter"),
+        # 1000 milliliters = 1 liter (inverse of the above).
+        pytest.param(1000, "milliliter", "liter", 1.0, id="milliliter_to_liter"),
+        # 1 cubic meter = 1000 liters (exact, by definition of the router's
+        # own `cubic_meter` constant).
+        pytest.param(1, "cubic_meter", "liter", 1000.0, id="cubic_meter_to_liter"),
+        # 2500 liters = 2.5 cubic meters (inverse ratio of the above).
+        pytest.param(2500, "liter", "cubic_meter", 2.5, id="liter_to_cubic_meter"),
+        # 1 gallon = 3.7854 liters (3.785411784 / 1.0, rounded to 4dp per
+        # the router's own `round(result, 4)`).
+        pytest.param(1, "gallon", "liter", 3.7854, id="gallon_to_liter_rounded"),
+        # 10 liters = 2.6417 gallons (10 / 3.785411784 == 2.64172052...,
+        # rounded to 4dp).
+        pytest.param(10, "liter", "gallon", 2.6417, id="liter_to_gallon_rounded"),
+        # 1 cubic foot = 28.3168 liters (28.316846592 / 1.0, rounded to
+        # 4dp).
+        pytest.param(1, "cubic_foot", "liter", 28.3168, id="cubic_foot_to_liter_rounded"),
+        # 100 liters = 3.5315 cubic feet (100 / 28.316846592 ==
+        # 3.53146667..., rounded to 4dp).
+        pytest.param(100, "liter", "cubic_foot", 3.5315, id="liter_to_cubic_foot_rounded"),
+        # 1 gallon = 0.1337 cubic feet (3.785411784 / 28.316846592 ==
+        # 0.13368055..., rounded to 4dp).
+        pytest.param(1, "gallon", "cubic_foot", 0.1337, id="gallon_to_cubic_foot_rounded"),
+        # 1 cubic foot = 7.4805 gallons (28.316846592 / 3.785411784 ==
+        # 7.48051948..., rounded to 4dp).
+        pytest.param(1, "cubic_foot", "gallon", 7.4805, id="cubic_foot_to_gallon_rounded"),
+        # 1 cubic meter = 264.1721 gallons (1000.0 / 3.785411784 ==
+        # 264.17205235..., rounded to 4dp).
+        pytest.param(1, "cubic_meter", "gallon", 264.1721, id="cubic_meter_to_gallon_rounded"),
+    ],
+)
+async def test_volume_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["liter", "milliliter", "cubic_meter", "gallon", "cubic_foot"],
+)
+async def test_all_five_volume_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 5
+    volume units as both a valid `from_unit` and a valid `to_unit` cheaply:
+    any unit not in the router's `units` dict would 400 with "Invalid unit"
+    instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_volume_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": 1, "from_unit": "pint", "to_unit": "liter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_volume_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": 1, "from_unit": "liter", "to_unit": "pint"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_volume_missing_value_field_rejected_with_422(client, api_key):
+    """`VolumeConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"from_unit": "liter", "to_unit": "gallon"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_volume_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": 1, "to_unit": "gallon"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_volume_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": 1, "from_unit": "liter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_volume_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": 1, "from_unit": "liter", "to_unit": "gallon"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_volume_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": 1, "from_unit": "liter", "to_unit": "gallon"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_volume_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `VolumeConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "liter", "to_unit": "gallon"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # Zero converts to zero regardless of unit pair.
+        pytest.param(0, "liter", "gallon", 0.0, id="zero_liter_to_gallon"),
+        pytest.param(0, "gallon", "liter", 0.0, id="zero_gallon_to_liter"),
+    ],
+)
+async def test_volume_zero_value_converts_to_zero(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # `convert_volume` has no non-negative validation - a negative value
+        # (physically meaningless for a volume) still runs through the same
+        # `value * units[from_unit] / units[to_unit]` formula and returns
+        # 200, not a 400. This documents that intentional non-validation
+        # rather than asserting a rejection the handler was never written to
+        # raise (mirrors
+        # `test_weight_accepts_negative_values_without_400`, a gap this
+        # volume suite was otherwise missing relative to its weight
+        # sibling).
+        # -5 * 1.0 / 3.785411784 == -1.32086..., rounded to 4dp == -1.3209.
+        pytest.param(-5, "liter", "gallon", -1.3209, id="negative_liter_to_gallon"),
+        # -1 * 28.316846592 / 1.0 == -28.316846592 exactly, rounded to 4dp
+        # == -28.3168.
+        pytest.param(-1, "cubic_foot", "liter", -28.3168, id="negative_cubic_foot_to_liter"),
+    ],
+)
+async def test_volume_accepts_negative_values_without_400(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+async def test_volume_round_trip_liter_to_gallon_to_liter_returns_approximately_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover (approximately)
+    the original value. Independently verified: 10 / 3.785411784 ==
+    2.64172052..., which the router rounds to 4dp (2.6417); converting
+    2.6417 back (2.6417 * 3.785411784 == 9.99990..., rounded to 9.9999)
+    does NOT recover the exact original at 4dp precision - the assertion
+    below uses a tolerance rather than exact equality, mirroring the area
+    and weight round-trip tests above."""
+    first = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": 10, "from_unit": "liter", "to_unit": "gallon"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 2.6417
+
+    second = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": intermediate, "from_unit": "gallon", "to_unit": "liter"},
         headers={"X-API-Key": api_key["key"]},
     )
     assert second.status_code == 200
