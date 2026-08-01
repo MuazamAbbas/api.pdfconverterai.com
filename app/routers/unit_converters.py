@@ -8,6 +8,7 @@ from app.models.unit_converters import (
     ContextualConvertRequest,
     LengthConvertRequest,
     TemperatureConvertRequest,
+    VolumeConvertRequest,
     WeightConvertRequest,
 )
 from app.services.unit_converters.contextual_convert import contextual_convert
@@ -144,6 +145,32 @@ async def convert_area(request: AreaConvertRequest, api_key: dict = Depends(veri
     except Exception as e:
         logger.exception("💥 Error converting area: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error converting area: {str(e)}")
+
+@router.post("/volume", summary="Convert volume between units")
+async def convert_volume(request: VolumeConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting volume: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "liter": 1.0,  # Base unit
+        "milliliter": 0.001,  # 1 liter = 1000 milliliters
+        "cubic_meter": 1000.0,  # 1 cubic meter = 1000 liters
+        "gallon": 3.785411784,  # 1 gallon (US) = 3.785411784 liters
+        "cubic_foot": 28.316846592  # 1 cubic foot = 28.316846592 liters
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting volume: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting volume: {str(e)}")
 
 @router.post("/convert", summary="Convert units using natural language query")
 async def contextual_convert_endpoint(request: ContextualConvertRequest, api_key: dict = Depends(verify_api_key)):
