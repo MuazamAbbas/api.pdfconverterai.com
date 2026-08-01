@@ -13,6 +13,7 @@ from app.models.unit_converters import (
     FlowRateConvertRequest,
     ForceConvertRequest,
     FrequencyConvertRequest,
+    FuelEfficiencyConvertRequest,
     LengthConvertRequest,
     PowerConvertRequest,
     PressureConvertRequest,
@@ -486,6 +487,78 @@ async def convert_angle(request: AngleConvertRequest, api_key: dict = Depends(ve
     except Exception as e:
         logger.exception("💥 Error converting angle: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error converting angle: {str(e)}")
+
+@router.post("/fuel_efficiency", summary="Convert fuel efficiency between units")
+async def convert_fuel_efficiency(
+    request: FuelEfficiencyConvertRequest, api_key: dict = Depends(verify_api_key)
+):
+    logger.debug(
+        "🔧 Converting fuel efficiency: %s %s to %s",
+        request.value, request.from_unit, request.to_unit
+    )
+    valid_units = {"mpg", "km_per_liter", "l_per_100km"}
+    if request.from_unit not in valid_units or request.to_unit not in valid_units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    if request.from_unit == request.to_unit:
+        logger.debug(
+            "✅ Conversion result: %s %s = %s %s",
+            request.value, request.from_unit, request.value, request.to_unit
+        )
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(request.value, 4)
+        }
+    try:
+        # Fuel efficiency conversions are reciprocal (L/100km is inversely
+        # proportional to km/L), not a simple multiplier-through-origin like
+        # length's `units` dict - convert from_unit to km_per_liter first as
+        # an internal base, then km_per_liter to to_unit, mirroring
+        # convert_temperature's affine from->base->to pattern above, but
+        # with division instead of an offset.
+        MPG_TO_KPL = 0.425143707  # 1 mile per US gallon = 0.425143707 km/L
+
+        if request.from_unit == "km_per_liter":
+            km_per_liter = request.value
+        elif request.from_unit == "mpg":
+            km_per_liter = request.value * MPG_TO_KPL
+        else:  # l_per_100km - reciprocal of km/L, not a multiplier
+            if request.value == 0:
+                raise ZeroDivisionError
+            km_per_liter = 100 / request.value
+
+        if request.to_unit == "km_per_liter":
+            result = km_per_liter
+        elif request.to_unit == "mpg":
+            result = km_per_liter / MPG_TO_KPL
+        else:  # l_per_100km
+            if km_per_liter == 0:
+                raise ZeroDivisionError
+            result = 100 / km_per_liter
+
+        logger.debug(
+            "✅ Conversion result: %s %s = %s %s",
+            request.value, request.from_unit, result, request.to_unit
+        )
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except ZeroDivisionError:
+        logger.error(
+            "❌ Invalid value for fuel efficiency conversion: %s %s to %s (division by zero)",
+            request.value, request.from_unit, request.to_unit
+        )
+        raise HTTPException(
+            status_code=400, detail="Invalid value: cannot convert a value of zero for this unit"
+        )
+    except Exception as e:
+        logger.exception("💥 Error converting fuel efficiency: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting fuel efficiency: {str(e)}")
 
 @router.post("/convert", summary="Convert units using natural language query")
 async def contextual_convert_endpoint(request: ContextualConvertRequest, api_key: dict = Depends(verify_api_key)):
