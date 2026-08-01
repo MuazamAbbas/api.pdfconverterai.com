@@ -3705,6 +3705,48 @@ async def test_fuel_efficiency_empty_string_unit_returns_400(client, api_key, fi
 
 
 @pytest.mark.parametrize(
+    "raw_value",
+    ["Infinity", "-Infinity", "NaN", "1e400", "-1e400"],
+)
+async def test_fuel_efficiency_inf_nan_value_rejected_with_422_not_500(
+    client, api_key, raw_value
+):
+    """`FuelEfficiencyConvertRequest.value` now carries
+    `Field(allow_inf_nan=False)` - Pydantic rejects `inf`/`nan` at
+    request-validation time with a clean 422, before the handler's
+    `value == 0` zero-guards ever run. Those guards alone can't catch this:
+    `inf == 0` and `nan == 0` are both `False` in Python, so without the
+    `Field` constraint a crafted value sails past both explicit
+    `except ZeroDivisionError` branches (and the `from_unit == to_unit`
+    identity short-circuit) and reaches `round(result, 4)` with `inf`/`nan`,
+    which then fails at response-serialization time (Starlette's
+    `JSONResponse` calls `json.dumps(..., allow_nan=False)`) with a generic
+    500 instead of a 422.
+
+    Covers both JSON's non-standard bare `Infinity`/`-Infinity`/`NaN`
+    tokens (which Python's `json.loads` accepts even though they're not
+    valid standard JSON) and an ordinary decimal literal that overflows to
+    `inf` at parse time (`1e400`)."""
+    raw_body = (
+        '{"value": %s, "from_unit": "mpg", "to_unit": "mpg"}' % raw_value
+    ).encode()
+    resp = await client.post(
+        "/v1/unit_converters/fuel_efficiency",
+        content=raw_body,
+        headers={
+            "X-API-Key": api_key["key"],
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert "inf" not in resp.text.lower()
+    assert "nan" not in resp.text.lower()
+
+
+@pytest.mark.parametrize(
     "value, from_unit, to_unit",
     [
         # `l_per_100km` as `from_unit` divides directly by `request.value`
