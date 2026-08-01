@@ -2,87 +2,87 @@ from pydantic import BaseModel, Field
 
 
 class LengthConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class TemperatureConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class WeightConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class AreaConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class VolumeConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class SpeedConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class TimeConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class DataConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class EnergyConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class PowerConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class PressureConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class FrequencyConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class ForceConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class TorqueConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class DensityConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class FlowRateConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
 class AngleConvertRequest(BaseModel):
-    value: float
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
@@ -94,7 +94,7 @@ class FuelEfficiencyConvertRequest(BaseModel):
     # and `nan == 0` are both `False`, so without this constraint such a
     # value would sail past those guards and fail later at response
     # serialization with a generic 500 instead.
-    value: float = Field(allow_inf_nan=False)
+    value: float = Field(allow_inf_nan=False, ge=-1e15, le=1e15)
     from_unit: str
     to_unit: str
 
