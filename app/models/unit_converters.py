@@ -46,5 +46,45 @@ class EnergyConvertRequest(BaseModel):
     from_unit: str
     to_unit: str
 
+class PowerConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class PressureConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class FrequencyConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class ForceConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class TorqueConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class DensityConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class FlowRateConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class AngleConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
 class ContextualConvertRequest(BaseModel):
     query: str  # e.g., "convert 5 feet to meters"
