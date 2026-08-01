@@ -306,3 +306,68 @@ async def test_temperature_missing_api_key_header_rejected(client):
     body = resp.json()
     assert body["success"] is False
     assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # -10 Kelvin is below absolute zero (0K = -273.15C) and is
+        # physically impossible, but `convert_temperature` only validates
+        # `from_unit`/`to_unit` names, not the numeric range - it has no
+        # concept of absolute zero. This documents that intentional
+        # non-validation (see PR discussion) rather than asserting a 400
+        # that the handler was never written to raise: celsius = -10 -
+        # 273.15 = -283.15 exactly, per the same from-Celsius-base formula
+        # as every other case above.
+        pytest.param(
+            -10, "kelvin", "celsius", -283.15, id="below_absolute_zero_kelvin_to_celsius"
+        ),
+        # Same negative-Kelvin input converted straight through to
+        # Fahrenheit: celsius = -283.15, then *9/5 + 32 = -477.67 exactly.
+        pytest.param(
+            -10, "kelvin", "fahrenheit", -477.67, id="below_absolute_zero_kelvin_to_fahrenheit"
+        ),
+        # A very large magnitude value exercises the formula outside the
+        # "reasonable temperature" range with no overflow/precision
+        # surprises: 1_000_000C -> K is exact float addition,
+        # 1_000_000 + 273.15 = 1000273.15.
+        pytest.param(
+            1_000_000, "celsius", "kelvin", 1000273.15, id="extreme_large_celsius_to_kelvin"
+        ),
+    ],
+)
+async def test_temperature_accepts_out_of_physical_range_values_without_400(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    """`convert_temperature` intentionally has no absolute-zero (or any
+    other physical-range) validation - only unit *names* are checked
+    against `valid_units`. A request with a numerically impossible value
+    (e.g. negative Kelvin) still returns 200 with the formula's result,
+    not a 400. If range validation is ever added, this test should be
+    updated to assert the new rejection behavior instead."""
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+async def test_temperature_missing_from_unit_field_rejected_with_422(client, api_key):
+    """Complements `test_temperature_missing_value_field_rejected_with_422`
+    - `from_unit` is likewise a required field with no default, so omitting
+    it also fails Pydantic validation (422) before the handler's own 400
+    "Invalid unit" path is ever reached."""
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"value": 1, "to_unit": "fahrenheit"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
