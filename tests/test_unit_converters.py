@@ -1091,6 +1091,40 @@ async def test_volume_zero_value_converts_to_zero(
     assert body["result"] == expected
 
 
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # `convert_volume` has no non-negative validation - a negative value
+        # (physically meaningless for a volume) still runs through the same
+        # `value * units[from_unit] / units[to_unit]` formula and returns
+        # 200, not a 400. This documents that intentional non-validation
+        # rather than asserting a rejection the handler was never written to
+        # raise (mirrors
+        # `test_weight_accepts_negative_values_without_400`, a gap this
+        # volume suite was otherwise missing relative to its weight
+        # sibling).
+        # -5 * 1.0 / 3.785411784 == -1.32086..., rounded to 4dp == -1.3209.
+        pytest.param(-5, "liter", "gallon", -1.3209, id="negative_liter_to_gallon"),
+        # -1 * 28.316846592 / 1.0 == -28.316846592 exactly, rounded to 4dp
+        # == -28.3168.
+        pytest.param(-1, "cubic_foot", "liter", -28.3168, id="negative_cubic_foot_to_liter"),
+    ],
+)
+async def test_volume_accepts_negative_values_without_400(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/volume",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
 async def test_volume_round_trip_liter_to_gallon_to_liter_returns_approximately_original(
     client, api_key
 ):
