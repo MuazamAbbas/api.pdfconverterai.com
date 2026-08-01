@@ -22,7 +22,7 @@ async def list_tools(api_key: dict = Depends(verify_api_key)):
             "ai_tools": ["summarize"],
             "seo_tools": ["keyword_density"],
             "web_tools": ["url_encode"],
-            "unit_converters": ["length", "temperature"],
+            "unit_converters": ["length", "temperature", "weight"],
             "binary_tools": ["text_to_binary"],
             "calculators": ["calculate"],
             "cyber_security": ["password_generator"],
