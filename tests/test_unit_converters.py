@@ -5,8 +5,16 @@
 `POST /v1/unit_converters/volume`,
 `POST /v1/unit_converters/speed`,
 `POST /v1/unit_converters/time`,
-`POST /v1/unit_converters/data`, and
-`POST /v1/unit_converters/energy` (Handbook Part I.2 - Tier 1, no job
+`POST /v1/unit_converters/data`,
+`POST /v1/unit_converters/energy`,
+`POST /v1/unit_converters/power`,
+`POST /v1/unit_converters/pressure`,
+`POST /v1/unit_converters/frequency`,
+`POST /v1/unit_converters/force`,
+`POST /v1/unit_converters/torque`,
+`POST /v1/unit_converters/density`,
+`POST /v1/unit_converters/flow_rate`, and
+`POST /v1/unit_converters/angle` (Handbook Part I.2 - Tier 1, no job
 queue, plain sync endpoints), plus their unit-validation and
 `verify_api_key` auth behavior.
 
@@ -85,6 +93,36 @@ exactly:
 Expected values for all four below are independently computed from the same
 `result = value * units[from_unit] / units[to_unit]` formula, rounded to 4
 decimal places, matching this file's established convention.
+
+Power, pressure, frequency, force, torque, density, flow_rate, and angle
+(batch 3) are ALL also multiplier-through-origin conversions (see each
+`convert_*`'s own `units` dict/formula in
+`app/routers/unit_converters.py`) - unit keys and base-relative multipliers
+below match the router exactly:
+- power: watt (base, 1.0), kilowatt (1000.0), horsepower (745.699872),
+  megawatt (1e6).
+- pressure: pascal (base, 1.0), atmosphere (101325.0), bar (100000.0), psi
+  (6894.757293168).
+- frequency: hertz (base, 1.0), kilohertz (1e3), megahertz (1e6), gigahertz
+  (1e9).
+- force: newton (base, 1.0), kilonewton (1000.0), pound_force
+  (4.4482216152605), kilogram_force (9.80665).
+- torque: newton_meter (base, 1.0), foot_pound (1.3558179483314), inch_pound
+  (0.1129848290276), kilogram_force_meter (9.80665).
+- density: kg_per_cubic_meter (base, 1.0), g_per_cubic_cm (1000.0),
+  lb_per_cubic_ft (16.018463374), kg_per_liter (1000.0).
+- flow_rate: liter_per_second (base, 1.0), cubic_meter_per_hour
+  (0.277777778), gallon_per_minute (0.0630901964), cubic_foot_per_minute
+  (0.4719474432).
+- angle: degree (0.017453292519943), radian (base, 1.0), gradian
+  (0.015707963267949), turn (6.283185307179586).
+
+Expected values for all eight below are independently computed from the
+same `result = value * units[from_unit] / units[to_unit]` formula, rounded
+to 4 decimal places, matching this file's established convention. Round-trip
+tests use `pytest.approx` (not exact equality) since not every unit pair's
+double-rounding cancels out cleanly at 4dp, mirroring the volume/area/weight
+round-trip tests above.
 """
 import pytest
 
@@ -1926,3 +1964,1551 @@ async def test_energy_round_trip_kilocalorie_to_joule_to_kilocalorie_returns_ori
     assert second.status_code == 200
     final = second.json()["result"]
     assert final == pytest.approx(10.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 kilowatt = 1000 watts (exact, by definition of the router's own
+        # `kilowatt` constant).
+        pytest.param(1, "kilowatt", "watt", 1000.0, id="kilowatt_to_watt"),
+        # 1 horsepower = 745.6999 watts (745.699872 rounded to 4dp).
+        pytest.param(1, "horsepower", "watt", 745.6999, id="horsepower_to_watt_rounded"),
+        # 1 megawatt = 1,000,000 watts (exact, by definition of the router's
+        # own `megawatt` constant).
+        pytest.param(1, "megawatt", "watt", 1_000_000.0, id="megawatt_to_watt"),
+        # 1 kilowatt = 1.341 horsepower (1000.0 / 745.699872 ==
+        # 1.34102209..., rounded to 4dp).
+        pytest.param(1, "kilowatt", "horsepower", 1.341, id="kilowatt_to_horsepower_rounded"),
+        # 10 horsepower = 7.457 kilowatts (10 * 745.699872 / 1000.0 ==
+        # 7.45699872, rounded to 4dp).
+        pytest.param(10, "horsepower", "kilowatt", 7.457, id="horsepower_to_kilowatt_rounded"),
+    ],
+)
+async def test_power_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["watt", "kilowatt", "horsepower", "megawatt"],
+)
+async def test_all_four_power_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    power units as both a valid `from_unit` and a valid `to_unit` cheaply:
+    any unit not in the router's `units` dict would 400 with "Invalid unit"
+    instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_power_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": 1, "from_unit": "btu_per_hour", "to_unit": "watt"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_power_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": 1, "from_unit": "watt", "to_unit": "btu_per_hour"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_power_missing_value_field_rejected_with_422(client, api_key):
+    """`PowerConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"from_unit": "kilowatt", "to_unit": "horsepower"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_power_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": 1, "to_unit": "horsepower"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_power_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": 1, "from_unit": "kilowatt"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_power_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": 1, "from_unit": "kilowatt", "to_unit": "horsepower"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_power_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": 1, "from_unit": "kilowatt", "to_unit": "horsepower"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_power_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `PowerConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "kilowatt", "to_unit": "horsepower"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/power",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_power_round_trip_kilowatt_to_horsepower_to_kilowatt_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover (approximately)
+    the original value. Independently verified: 10 * 1000.0 / 745.699872 ==
+    13.41021806..., which the router rounds to 4dp (13.4102); converting
+    13.4102 back (13.4102 * 745.699872 / 1000.0 == 9.99992...) recovers the
+    original within a small tolerance."""
+    first = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": 10, "from_unit": "kilowatt", "to_unit": "horsepower"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 13.4102
+
+    second = await client.post(
+        "/v1/unit_converters/power",
+        json={"value": intermediate, "from_unit": "horsepower", "to_unit": "kilowatt"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 atmosphere = 101325 pascals (exact, by definition of the
+        # router's own `atmosphere` constant).
+        pytest.param(1, "atmosphere", "pascal", 101325.0, id="atmosphere_to_pascal"),
+        # 1 bar = 100000 pascals (exact, by definition of the router's own
+        # `bar` constant).
+        pytest.param(1, "bar", "pascal", 100000.0, id="bar_to_pascal"),
+        # 1 psi = 6894.7573 pascals (6894.757293168 rounded to 4dp).
+        pytest.param(1, "psi", "pascal", 6894.7573, id="psi_to_pascal_rounded"),
+        # 1 bar = 14.5038 psi (100000.0 / 6894.757293168 == 14.50377377...,
+        # rounded to 4dp).
+        pytest.param(1, "bar", "psi", 14.5038, id="bar_to_psi_rounded"),
+        # 1 atmosphere = 1.0132 bar (101325.0 / 100000.0 == 1.01325, rounded
+        # to 4dp).
+        pytest.param(1, "atmosphere", "bar", 1.0132, id="atmosphere_to_bar_rounded"),
+    ],
+)
+async def test_pressure_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["pascal", "atmosphere", "bar", "psi"],
+)
+async def test_all_four_pressure_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    pressure units as both a valid `from_unit` and a valid `to_unit`
+    cheaply: any unit not in the router's `units` dict would 400 with
+    "Invalid unit" instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_pressure_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": 1, "from_unit": "torr", "to_unit": "pascal"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_pressure_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": 1, "from_unit": "pascal", "to_unit": "torr"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_pressure_missing_value_field_rejected_with_422(client, api_key):
+    """`PressureConvertRequest.value` has no default, so omitting it
+    entirely fails Pydantic validation before the handler body ever runs -
+    a 422, distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"from_unit": "bar", "to_unit": "psi"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_pressure_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": 1, "to_unit": "psi"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_pressure_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": 1, "from_unit": "bar"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_pressure_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": 1, "from_unit": "bar", "to_unit": "psi"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_pressure_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": 1, "from_unit": "bar", "to_unit": "psi"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_pressure_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `PressureConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "bar", "to_unit": "psi"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/pressure",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_pressure_round_trip_bar_to_psi_to_bar_returns_original(client, api_key):
+    """A round trip through two conversions should recover (approximately)
+    the original value. Independently verified: 10 * 100000.0 /
+    6894.757293168 == 145.03773772..., which the router rounds to 4dp
+    (145.0377); converting 145.0377 back (145.0377 * 6894.757293168 /
+    100000.0 == 9.99998...) recovers the original within a small
+    tolerance."""
+    first = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": 10, "from_unit": "bar", "to_unit": "psi"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 145.0377
+
+    second = await client.post(
+        "/v1/unit_converters/pressure",
+        json={"value": intermediate, "from_unit": "psi", "to_unit": "bar"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 kilohertz = 1000 hertz (exact, by definition of the router's
+        # own `kilohertz` constant).
+        pytest.param(1, "kilohertz", "hertz", 1000.0, id="kilohertz_to_hertz"),
+        # 1 megahertz = 1000 kilohertz (1e6 / 1e3 == 1000.0 exactly).
+        pytest.param(1, "megahertz", "kilohertz", 1000.0, id="megahertz_to_kilohertz"),
+        # 1 gigahertz = 1000 megahertz (1e9 / 1e6 == 1000.0 exactly).
+        pytest.param(1, "gigahertz", "megahertz", 1000.0, id="gigahertz_to_megahertz"),
+        # 1 gigahertz = 1,000,000,000 hertz (exact, by definition of the
+        # router's own `gigahertz` constant).
+        pytest.param(1, "gigahertz", "hertz", 1_000_000_000.0, id="gigahertz_to_hertz"),
+    ],
+)
+async def test_frequency_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["hertz", "kilohertz", "megahertz", "gigahertz"],
+)
+async def test_all_four_frequency_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    frequency units as both a valid `from_unit` and a valid `to_unit`
+    cheaply: any unit not in the router's `units` dict would 400 with
+    "Invalid unit" instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_frequency_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": 1, "from_unit": "terahertz", "to_unit": "hertz"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_frequency_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": 1, "from_unit": "hertz", "to_unit": "terahertz"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_frequency_missing_value_field_rejected_with_422(client, api_key):
+    """`FrequencyConvertRequest.value` has no default, so omitting it
+    entirely fails Pydantic validation before the handler body ever runs -
+    a 422, distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"from_unit": "megahertz", "to_unit": "kilohertz"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_frequency_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": 1, "to_unit": "kilohertz"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_frequency_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": 1, "from_unit": "megahertz"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_frequency_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": 1, "from_unit": "megahertz", "to_unit": "kilohertz"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_frequency_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": 1, "from_unit": "megahertz", "to_unit": "kilohertz"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_frequency_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `FrequencyConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "megahertz", "to_unit": "kilohertz"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/frequency",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_frequency_round_trip_gigahertz_to_megahertz_to_gigahertz_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover the original
+    value exactly here: 10 * 1e9 / 1e6 == 10000.0 exactly (clean
+    power-of-ten ratio, no rounding error), and 10000.0 * 1e6 / 1e9 == 10.0
+    exactly."""
+    first = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": 10, "from_unit": "gigahertz", "to_unit": "megahertz"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 10000.0
+
+    second = await client.post(
+        "/v1/unit_converters/frequency",
+        json={"value": intermediate, "from_unit": "megahertz", "to_unit": "gigahertz"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 kilonewton = 1000 newtons (exact, by definition of the router's
+        # own `kilonewton` constant).
+        pytest.param(1, "kilonewton", "newton", 1000.0, id="kilonewton_to_newton"),
+        # 1 pound-force = 4.4482 newtons (4.4482216152605 rounded to 4dp).
+        pytest.param(1, "pound_force", "newton", 4.4482, id="pound_force_to_newton_rounded"),
+        # 1 kilogram-force = 9.8066 newtons (9.80665 rounded to 4dp).
+        pytest.param(
+            1, "kilogram_force", "newton", 9.8066, id="kilogram_force_to_newton_rounded"
+        ),
+        # 1 kilogram-force = 2.2046 pound-force (9.80665 / 4.4482216152605
+        # == 2.20462262..., rounded to 4dp).
+        pytest.param(
+            1, "kilogram_force", "pound_force", 2.2046, id="kilogram_force_to_pound_force_rounded"
+        ),
+        # 10 newtons = 2.2481 pound-force (10 / 4.4482216152605 ==
+        # 2.24808943..., rounded to 4dp).
+        pytest.param(10, "newton", "pound_force", 2.2481, id="newton_to_pound_force_rounded"),
+    ],
+)
+async def test_force_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["newton", "kilonewton", "pound_force", "kilogram_force"],
+)
+async def test_all_four_force_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    force units as both a valid `from_unit` and a valid `to_unit` cheaply:
+    any unit not in the router's `units` dict would 400 with "Invalid unit"
+    instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_force_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": 1, "from_unit": "dyne", "to_unit": "newton"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_force_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": 1, "from_unit": "newton", "to_unit": "dyne"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_force_missing_value_field_rejected_with_422(client, api_key):
+    """`ForceConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"from_unit": "kilogram_force", "to_unit": "pound_force"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_force_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": 1, "to_unit": "pound_force"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_force_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": 1, "from_unit": "kilogram_force"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_force_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": 1, "from_unit": "kilogram_force", "to_unit": "pound_force"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_force_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": 1, "from_unit": "kilogram_force", "to_unit": "pound_force"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_force_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `ForceConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "kilogram_force", "to_unit": "pound_force"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/force",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_force_round_trip_kilogram_force_to_pound_force_to_kilogram_force_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover (approximately)
+    the original value. Independently verified: 10 * 9.80665 /
+    4.4482216152605 == 22.04622622..., which the router rounds to 4dp
+    (22.0462); converting 22.0462 back (22.0462 * 4.4482216152605 /
+    9.80665 == 9.99999...) recovers the original within a small
+    tolerance."""
+    first = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": 10, "from_unit": "kilogram_force", "to_unit": "pound_force"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 22.0462
+
+    second = await client.post(
+        "/v1/unit_converters/force",
+        json={"value": intermediate, "from_unit": "pound_force", "to_unit": "kilogram_force"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 foot-pound = 1.3558 newton-meters (1.3558179483314 rounded to
+        # 4dp).
+        pytest.param(1, "foot_pound", "newton_meter", 1.3558, id="foot_pound_to_newton_meter_rounded"),
+        # 1 inch-pound = 0.113 newton-meters (0.1129848290276 rounded to
+        # 4dp).
+        pytest.param(1, "inch_pound", "newton_meter", 0.113, id="inch_pound_to_newton_meter_rounded"),
+        # 1 kilogram-force meter = 9.8066 newton-meters (9.80665 rounded to
+        # 4dp).
+        pytest.param(
+            1,
+            "kilogram_force_meter",
+            "newton_meter",
+            9.8066,
+            id="kilogram_force_meter_to_newton_meter_rounded",
+        ),
+        # 1 foot-pound = 12 inch-pounds exactly (1.3558179483314 /
+        # 0.1129848290276 == 12.0 exactly, by definition of these two
+        # router constants).
+        pytest.param(1, "foot_pound", "inch_pound", 12.0, id="foot_pound_to_inch_pound"),
+        # 10 newton-meters = 7.3756 foot-pounds (10 / 1.3558179483314 ==
+        # 7.37561669..., rounded to 4dp).
+        pytest.param(10, "newton_meter", "foot_pound", 7.3756, id="newton_meter_to_foot_pound_rounded"),
+    ],
+)
+async def test_torque_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["newton_meter", "foot_pound", "inch_pound", "kilogram_force_meter"],
+)
+async def test_all_four_torque_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    torque units as both a valid `from_unit` and a valid `to_unit` cheaply:
+    any unit not in the router's `units` dict would 400 with "Invalid unit"
+    instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_torque_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": 1, "from_unit": "dyne_centimeter", "to_unit": "newton_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_torque_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": 1, "from_unit": "newton_meter", "to_unit": "dyne_centimeter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_torque_missing_value_field_rejected_with_422(client, api_key):
+    """`TorqueConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"from_unit": "foot_pound", "to_unit": "inch_pound"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_torque_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": 1, "to_unit": "inch_pound"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_torque_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": 1, "from_unit": "foot_pound"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_torque_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": 1, "from_unit": "foot_pound", "to_unit": "inch_pound"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_torque_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": 1, "from_unit": "foot_pound", "to_unit": "inch_pound"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_torque_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `TorqueConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "foot_pound", "to_unit": "inch_pound"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/torque",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_torque_round_trip_foot_pound_to_inch_pound_to_foot_pound_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover the original
+    value exactly here: 10 * 1.3558179483314 / 0.1129848290276 == 120.0
+    exactly (clean 12x ratio, no rounding error), and 120.0 *
+    0.1129848290276 / 1.3558179483314 == 10.0 exactly."""
+    first = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": 10, "from_unit": "foot_pound", "to_unit": "inch_pound"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 120.0
+
+    second = await client.post(
+        "/v1/unit_converters/torque",
+        json={"value": intermediate, "from_unit": "inch_pound", "to_unit": "foot_pound"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 g/cm3 = 1000 kg/m3 (exact, by definition of the router's own
+        # `g_per_cubic_cm` constant).
+        pytest.param(1, "g_per_cubic_cm", "kg_per_cubic_meter", 1000.0, id="g_per_cubic_cm_to_kg_per_cubic_meter"),
+        # 1 lb/ft3 = 16.0185 kg/m3 (16.018463374 rounded to 4dp).
+        pytest.param(
+            1, "lb_per_cubic_ft", "kg_per_cubic_meter", 16.0185, id="lb_per_cubic_ft_to_kg_per_cubic_meter_rounded"
+        ),
+        # 1 kg/L = 1000 kg/m3 (exact, by definition of the router's own
+        # `kg_per_liter` constant).
+        pytest.param(1, "kg_per_liter", "kg_per_cubic_meter", 1000.0, id="kg_per_liter_to_kg_per_cubic_meter"),
+        # 1 g/cm3 = 1 kg/L (1000.0 / 1000.0 == 1.0 exactly, by definition of
+        # these two router constants).
+        pytest.param(1, "g_per_cubic_cm", "kg_per_liter", 1.0, id="g_per_cubic_cm_to_kg_per_liter"),
+        # 100 kg/m3 = 6.2428 lb/ft3 (100 / 16.018463374 == 6.24279606...,
+        # rounded to 4dp).
+        pytest.param(
+            100, "kg_per_cubic_meter", "lb_per_cubic_ft", 6.2428, id="kg_per_cubic_meter_to_lb_per_cubic_ft_rounded"
+        ),
+    ],
+)
+async def test_density_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["kg_per_cubic_meter", "g_per_cubic_cm", "lb_per_cubic_ft", "kg_per_liter"],
+)
+async def test_all_four_density_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    density units as both a valid `from_unit` and a valid `to_unit`
+    cheaply: any unit not in the router's `units` dict would 400 with
+    "Invalid unit" instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_density_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": 1, "from_unit": "oz_per_gallon", "to_unit": "kg_per_cubic_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_density_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": 1, "from_unit": "kg_per_cubic_meter", "to_unit": "oz_per_gallon"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_density_missing_value_field_rejected_with_422(client, api_key):
+    """`DensityConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"from_unit": "lb_per_cubic_ft", "to_unit": "kg_per_cubic_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_density_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": 1, "to_unit": "kg_per_cubic_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_density_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": 1, "from_unit": "lb_per_cubic_ft"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_density_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": 1, "from_unit": "lb_per_cubic_ft", "to_unit": "kg_per_cubic_meter"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_density_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": 1, "from_unit": "lb_per_cubic_ft", "to_unit": "kg_per_cubic_meter"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_density_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `DensityConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "lb_per_cubic_ft", "to_unit": "kg_per_cubic_meter"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/density",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_density_round_trip_lb_per_cubic_ft_to_kg_per_cubic_meter_to_lb_per_cubic_ft_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover the original
+    value exactly here: 10 * 16.018463374 / 1.0 == 160.18463374 exactly,
+    rounded to 4dp == 160.1846; converting 160.1846 back (160.1846 * 1.0 /
+    16.018463374 == 9.99999...) recovers the original within a small
+    tolerance."""
+    first = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": 10, "from_unit": "lb_per_cubic_ft", "to_unit": "kg_per_cubic_meter"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 160.1846
+
+    second = await client.post(
+        "/v1/unit_converters/density",
+        json={"value": intermediate, "from_unit": "kg_per_cubic_meter", "to_unit": "lb_per_cubic_ft"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 cubic_meter_per_hour = 0.2778 liter_per_second (0.277777778
+        # rounded to 4dp).
+        pytest.param(
+            1,
+            "cubic_meter_per_hour",
+            "liter_per_second",
+            0.2778,
+            id="cubic_meter_per_hour_to_liter_per_second_rounded",
+        ),
+        # 1 gallon_per_minute = 0.0631 liter_per_second (0.0630901964
+        # rounded to 4dp).
+        pytest.param(
+            1, "gallon_per_minute", "liter_per_second", 0.0631, id="gallon_per_minute_to_liter_per_second_rounded"
+        ),
+        # 1 cubic_foot_per_minute = 0.4719 liter_per_second (0.4719474432
+        # rounded to 4dp).
+        pytest.param(
+            1,
+            "cubic_foot_per_minute",
+            "liter_per_second",
+            0.4719,
+            id="cubic_foot_per_minute_to_liter_per_second_rounded",
+        ),
+        # 1 liter_per_second = 3.6 cubic_meter_per_hour (1.0 / 0.277777778
+        # == 3.60000000..., rounded to 4dp).
+        pytest.param(
+            1, "liter_per_second", "cubic_meter_per_hour", 3.6, id="liter_per_second_to_cubic_meter_per_hour"
+        ),
+        # 1 gallon_per_minute = 0.1337 cubic_foot_per_minute
+        # (0.0630901964 / 0.4719474432 == 0.13368055..., rounded to 4dp).
+        pytest.param(
+            1,
+            "gallon_per_minute",
+            "cubic_foot_per_minute",
+            0.1337,
+            id="gallon_per_minute_to_cubic_foot_per_minute_rounded",
+        ),
+    ],
+)
+async def test_flow_rate_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["liter_per_second", "cubic_meter_per_hour", "gallon_per_minute", "cubic_foot_per_minute"],
+)
+async def test_all_four_flow_rate_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    flow rate units as both a valid `from_unit` and a valid `to_unit`
+    cheaply: any unit not in the router's `units` dict would 400 with
+    "Invalid unit" instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_flow_rate_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": 1, "from_unit": "barrel_per_day", "to_unit": "liter_per_second"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_flow_rate_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": 1, "from_unit": "liter_per_second", "to_unit": "barrel_per_day"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_flow_rate_missing_value_field_rejected_with_422(client, api_key):
+    """`FlowRateConvertRequest.value` has no default, so omitting it
+    entirely fails Pydantic validation before the handler body ever runs -
+    a 422, distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"from_unit": "gallon_per_minute", "to_unit": "cubic_foot_per_minute"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_flow_rate_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": 1, "to_unit": "cubic_foot_per_minute"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_flow_rate_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": 1, "from_unit": "gallon_per_minute"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_flow_rate_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": 1, "from_unit": "gallon_per_minute", "to_unit": "cubic_foot_per_minute"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_flow_rate_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": 1, "from_unit": "gallon_per_minute", "to_unit": "cubic_foot_per_minute"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_flow_rate_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `FlowRateConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "gallon_per_minute", "to_unit": "cubic_foot_per_minute"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_flow_rate_round_trip_gallon_per_minute_to_cubic_foot_per_minute_to_gallon_per_minute_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover (approximately)
+    the original value. Independently verified: 10 * 0.0630901964 /
+    0.4719474432 == 1.33680555..., which the router rounds to 4dp
+    (1.3368); converting 1.3368 back (1.3368 * 0.4719474432 /
+    0.0630901964 == 9.99978...) recovers the original within a small
+    tolerance."""
+    first = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": 10, "from_unit": "gallon_per_minute", "to_unit": "cubic_foot_per_minute"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 1.3368
+
+    second = await client.post(
+        "/v1/unit_converters/flow_rate",
+        json={"value": intermediate, "from_unit": "cubic_foot_per_minute", "to_unit": "gallon_per_minute"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 180 degrees = pi radians (180 * 0.017453292519943 ==
+        # 3.14159265..., rounded to 4dp).
+        pytest.param(180, "degree", "radian", 3.1416, id="180_degree_to_radian"),
+        # 1 turn = 2*pi radians (6.283185307179586 rounded to 4dp).
+        pytest.param(1, "turn", "radian", 6.2832, id="turn_to_radian_rounded"),
+        # 1 turn = 360 degrees (6.283185307179586 / 0.017453292519943 ==
+        # 360.0 exactly, by definition of these two router constants).
+        pytest.param(1, "turn", "degree", 360.0, id="turn_to_degree"),
+        # 100 gradians = 90 degrees (100 * 0.015707963267949 /
+        # 0.017453292519943 == 90.0 exactly, by definition of these two
+        # router constants).
+        pytest.param(100, "gradian", "degree", 90.0, id="100_gradian_to_degree"),
+        # 1 radian = 57.2958 degrees (1.0 / 0.017453292519943 ==
+        # 57.29577951..., rounded to 4dp).
+        pytest.param(1, "radian", "degree", 57.2958, id="radian_to_degree_rounded"),
+    ],
+)
+async def test_angle_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["degree", "radian", "gradian", "turn"],
+)
+async def test_all_four_angle_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    angle units as both a valid `from_unit` and a valid `to_unit` cheaply:
+    any unit not in the router's `units` dict would 400 with "Invalid unit"
+    instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_angle_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": 1, "from_unit": "arcminute", "to_unit": "degree"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_angle_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": 1, "from_unit": "degree", "to_unit": "arcminute"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_angle_missing_value_field_rejected_with_422(client, api_key):
+    """`AngleConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"from_unit": "degree", "to_unit": "radian"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_angle_missing_from_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": 1, "to_unit": "radian"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_angle_missing_to_unit_field_rejected_with_422(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": 1, "from_unit": "degree"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_angle_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": 1, "from_unit": "degree", "to_unit": "radian"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_angle_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": 1, "from_unit": "degree", "to_unit": "radian"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_angle_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `AngleConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "degree", "to_unit": "radian"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/angle",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_angle_round_trip_degree_to_radian_to_degree_returns_approximately_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover (approximately)
+    the original value. Independently verified: 10 * 0.017453292519943 /
+    1.0 == 0.17453292519943, which the router rounds to 4dp (0.1745);
+    converting 0.1745 back (0.1745 * 1.0 / 0.017453292519943 ==
+    9.99810...) does NOT recover the exact original at 4dp precision - the
+    assertion below uses a tolerance rather than exact equality, mirroring
+    the volume round-trip test above."""
+    first = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": 10, "from_unit": "degree", "to_unit": "radian"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 0.1745
+
+    second = await client.post(
+        "/v1/unit_converters/angle",
+        json={"value": intermediate, "from_unit": "radian", "to_unit": "degree"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-2)

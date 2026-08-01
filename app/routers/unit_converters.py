@@ -4,14 +4,22 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import verify_api_key
 from app.models.unit_converters import (
+    AngleConvertRequest,
     AreaConvertRequest,
     ContextualConvertRequest,
     DataConvertRequest,
+    DensityConvertRequest,
     EnergyConvertRequest,
+    FlowRateConvertRequest,
+    ForceConvertRequest,
+    FrequencyConvertRequest,
     LengthConvertRequest,
+    PowerConvertRequest,
+    PressureConvertRequest,
     SpeedConvertRequest,
     TemperatureConvertRequest,
     TimeConvertRequest,
+    TorqueConvertRequest,
     VolumeConvertRequest,
     WeightConvertRequest,
 )
@@ -278,6 +286,206 @@ async def convert_energy(request: EnergyConvertRequest, api_key: dict = Depends(
     except Exception as e:
         logger.exception("💥 Error converting energy: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error converting energy: {str(e)}")
+
+@router.post("/power", summary="Convert power between units")
+async def convert_power(request: PowerConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting power: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "watt": 1.0,  # Base unit
+        "kilowatt": 1000.0,  # 1 kilowatt = 1000 watts
+        "horsepower": 745.699872,  # 1 horsepower = 745.699872 watts
+        "megawatt": 1_000_000.0  # 1 megawatt = 1,000,000 watts
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting power: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting power: {str(e)}")
+
+@router.post("/pressure", summary="Convert pressure between units")
+async def convert_pressure(request: PressureConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting pressure: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "pascal": 1.0,  # Base unit
+        "atmosphere": 101325.0,  # 1 atmosphere = 101325 pascals
+        "bar": 100000.0,  # 1 bar = 100000 pascals
+        "psi": 6894.757293168  # 1 psi = 6894.757293168 pascals
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting pressure: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting pressure: {str(e)}")
+
+@router.post("/frequency", summary="Convert frequency between units")
+async def convert_frequency(request: FrequencyConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting frequency: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "hertz": 1.0,  # Base unit
+        "kilohertz": 1_000.0,  # 1 kilohertz = 1000 hertz
+        "megahertz": 1_000_000.0,  # 1 megahertz = 1,000,000 hertz
+        "gigahertz": 1_000_000_000.0  # 1 gigahertz = 1,000,000,000 hertz
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting frequency: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting frequency: {str(e)}")
+
+@router.post("/force", summary="Convert force between units")
+async def convert_force(request: ForceConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting force: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "newton": 1.0,  # Base unit
+        "kilonewton": 1000.0,  # 1 kilonewton = 1000 newtons
+        "pound_force": 4.4482216152605,  # 1 pound-force = 4.4482216152605 newtons
+        "kilogram_force": 9.80665  # 1 kilogram-force = 9.80665 newtons
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting force: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting force: {str(e)}")
+
+@router.post("/torque", summary="Convert torque between units")
+async def convert_torque(request: TorqueConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting torque: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "newton_meter": 1.0,  # Base unit
+        "foot_pound": 1.3558179483314,  # 1 foot-pound = 1.3558179483314 newton-meters
+        "inch_pound": 0.1129848290276,  # 1 inch-pound = 0.1129848290276 newton-meters
+        "kilogram_force_meter": 9.80665  # 1 kilogram-force meter = 9.80665 newton-meters
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting torque: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting torque: {str(e)}")
+
+@router.post("/density", summary="Convert density between units")
+async def convert_density(request: DensityConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting density: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "kg_per_cubic_meter": 1.0,  # Base unit
+        "g_per_cubic_cm": 1000.0,  # 1 g/cm3 = 1000 kg/m3
+        "lb_per_cubic_ft": 16.018463374,  # 1 lb/ft3 = 16.018463374 kg/m3
+        "kg_per_liter": 1000.0  # 1 kg/L = 1000 kg/m3
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting density: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting density: {str(e)}")
+
+@router.post("/flow_rate", summary="Convert flow rate between units")
+async def convert_flow_rate(request: FlowRateConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting flow rate: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "liter_per_second": 1.0,  # Base unit
+        "cubic_meter_per_hour": 0.277777778,  # 1 m3/h = 0.277777778 L/s
+        "gallon_per_minute": 0.0630901964,  # 1 gal/min = 0.0630901964 L/s
+        "cubic_foot_per_minute": 0.4719474432  # 1 ft3/min = 0.4719474432 L/s
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting flow rate: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting flow rate: {str(e)}")
+
+@router.post("/angle", summary="Convert angle between units")
+async def convert_angle(request: AngleConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting angle: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "degree": 0.017453292519943,  # 1 degree = 0.017453292519943 radians
+        "radian": 1.0,  # Base unit
+        "gradian": 0.015707963267949,  # 1 gradian = 0.015707963267949 radians
+        "turn": 6.283185307179586  # 1 turn = 6.283185307179586 radians
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting angle: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting angle: {str(e)}")
 
 @router.post("/convert", summary="Convert units using natural language query")
 async def contextual_convert_endpoint(request: ContextualConvertRequest, api_key: dict = Depends(verify_api_key)):
