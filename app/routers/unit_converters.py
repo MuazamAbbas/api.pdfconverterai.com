@@ -6,8 +6,12 @@ from app.core.security import verify_api_key
 from app.models.unit_converters import (
     AreaConvertRequest,
     ContextualConvertRequest,
+    DataConvertRequest,
+    EnergyConvertRequest,
     LengthConvertRequest,
+    SpeedConvertRequest,
     TemperatureConvertRequest,
+    TimeConvertRequest,
     VolumeConvertRequest,
     WeightConvertRequest,
 )
@@ -171,6 +175,109 @@ async def convert_volume(request: VolumeConvertRequest, api_key: dict = Depends(
     except Exception as e:
         logger.exception("💥 Error converting volume: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error converting volume: {str(e)}")
+
+@router.post("/speed", summary="Convert speed between units")
+async def convert_speed(request: SpeedConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting speed: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "meter_per_second": 1.0,  # Base unit
+        "kilometer_per_hour": 0.277777778,  # 1 km/h = 0.277777778 m/s
+        "mile_per_hour": 0.44704,  # 1 mph = 0.44704 m/s
+        "knot": 0.514444444  # 1 knot = 0.514444444 m/s
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting speed: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting speed: {str(e)}")
+
+@router.post("/time", summary="Convert time between units")
+async def convert_time(request: TimeConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting time: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "second": 1.0,  # Base unit
+        "minute": 60.0,  # 1 minute = 60 seconds
+        "hour": 3600.0,  # 1 hour = 3600 seconds
+        "day": 86400.0,  # 1 day = 86400 seconds
+        "week": 604800.0  # 1 week = 604800 seconds
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting time: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting time: {str(e)}")
+
+@router.post("/data", summary="Convert data storage size between units")
+async def convert_data(request: DataConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting data: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "byte": 1.0,  # Base unit
+        "kilobyte": 1024.0,  # 1 KB = 1024 bytes (binary)
+        "megabyte": 1024.0 ** 2,  # 1 MB = 1024^2 bytes (binary)
+        "gigabyte": 1024.0 ** 3,  # 1 GB = 1024^3 bytes (binary)
+        "terabyte": 1024.0 ** 4  # 1 TB = 1024^4 bytes (binary)
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting data: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting data: {str(e)}")
+
+@router.post("/energy", summary="Convert energy between units")
+async def convert_energy(request: EnergyConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting energy: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "joule": 1.0,  # Base unit
+        "kilojoule": 1000.0,  # 1 kilojoule = 1000 joules
+        "calorie": 4.184,  # 1 calorie = 4.184 joules
+        "kilocalorie": 4184.0,  # 1 kilocalorie = 4184 joules
+        "watt_hour": 3600.0  # 1 watt-hour = 3600 joules
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting energy: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting energy: {str(e)}")
 
 @router.post("/convert", summary="Convert units using natural language query")
 async def contextual_convert_endpoint(request: ContextualConvertRequest, api_key: dict = Depends(verify_api_key)):
