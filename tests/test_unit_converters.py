@@ -508,3 +508,170 @@ async def test_weight_missing_api_key_header_rejected(client):
     body = resp.json()
     assert body["success"] is False
     assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_weight_missing_to_unit_field_rejected_with_422(client, api_key):
+    """Complements `test_weight_missing_value_field_rejected_with_422` -
+    `to_unit` is likewise a required field with no default on
+    `WeightConvertRequest`, so omitting it also fails Pydantic validation
+    (422) before the handler's own 400 "Invalid unit" path is ever reached.
+    Neither the length nor temperature suites in this file cover this field
+    either - filed as a gap, closed here first."""
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 1, "from_unit": "kilogram"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_weight_missing_from_unit_field_rejected_with_422(client, api_key):
+    """Mirrors
+    `test_temperature_missing_from_unit_field_rejected_with_422` - `from_unit`
+    is a required field with no default, so omitting it also fails Pydantic
+    validation (422) before the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 1, "to_unit": "pound"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("field", ["from_unit", "to_unit"])
+async def test_weight_empty_string_unit_returns_400(client, api_key, field):
+    """An empty string is a structurally valid `str` for Pydantic (no
+    `min_length` constraint on `WeightConvertRequest`), so it passes
+    validation and reaches the handler body - where `"" not in units`
+    correctly falls into the same 400 "Invalid unit" path as any other
+    unrecognized unit name, not a 422."""
+    payload = {"value": 1, "from_unit": "kilogram", "to_unit": "pound"}
+    payload[field] = ""
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json=payload,
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # Zero converts to zero regardless of unit pair - both units
+        # multiply/divide a zero value, so the result is exactly 0.0 either
+        # way.
+        pytest.param(0, "kilogram", "pound", 0.0, id="zero_kilogram_to_pound"),
+        pytest.param(0, "pound", "kilogram", 0.0, id="zero_pound_to_kilogram"),
+    ],
+)
+async def test_weight_zero_value_converts_to_zero(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # `convert_weight` has no non-negative validation - a negative
+        # value (physically meaningless for a mass) still runs through the
+        # same `value * units[from_unit] / units[to_unit]` formula and
+        # returns 200, not a 400. This documents that intentional
+        # non-validation rather than asserting a rejection the handler was
+        # never written to raise (mirrors
+        # `test_temperature_accepts_out_of_physical_range_values_without_400`).
+        # -5 * 1.0 / 0.001 == -5000.0 exactly.
+        pytest.param(-5, "kilogram", "gram", -5000.0, id="negative_kilogram_to_gram"),
+        # -1 * 0.45359237 / 0.028349523125 == -16.0 exactly (same clean
+        # 16-ounces-per-pound identity as `pound_to_ounce` above, negated).
+        pytest.param(-1, "pound", "ounce", -16.0, id="negative_pound_to_ounce"),
+    ],
+)
+async def test_weight_accepts_negative_values_without_400(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+async def test_weight_round_trip_kilogram_to_pound_to_kilogram_returns_original(
+    client, api_key
+):
+    """A round trip through two conversions should recover (approximately)
+    the original value. Independently verified: 10 / 0.45359237 ==
+    22.046226218487758, which the router rounds to 4dp (22.0462); converting
+    22.0462 back (22.0462 * 0.45359237 == 10.00000029038794, rounded to
+    10.0) recovers the exact original here - the rounding error at 4dp
+    happens to cancel out for this value, but the assertion below uses a
+    tolerance rather than depending on that coincidence."""
+    first = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 10, "from_unit": "kilogram", "to_unit": "pound"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 22.0462
+
+    second = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": intermediate, "from_unit": "pound", "to_unit": "kilogram"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(10.0, abs=1e-3)
+
+
+async def test_weight_round_trip_gram_to_ounce_to_gram_returns_approximately_original(
+    client, api_key
+):
+    """Same round-trip shape as the kilogram/pound test above, but with a
+    unit pair where the two roundings do NOT cancel out exactly - 250g ->
+    ounce -> g independently computes to 250.0003, not 250.0, demonstrating
+    why round-trip assertions need a tolerance rather than exact equality in
+    general."""
+    first = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 250, "from_unit": "gram", "to_unit": "ounce"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert first.status_code == 200
+    intermediate = first.json()["result"]
+    assert intermediate == 8.8185
+
+    second = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": intermediate, "from_unit": "ounce", "to_unit": "gram"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert second.status_code == 200
+    final = second.json()["result"]
+    assert final == pytest.approx(250.0, abs=1e-2)
+    assert final != 250.0
