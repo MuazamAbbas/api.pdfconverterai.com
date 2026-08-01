@@ -1,5 +1,6 @@
-"""Coverage for `POST /v1/unit_converters/length` (Handbook Part I.2 - Tier 1,
-no job queue, plain sync endpoint), plus its unit-validation and
+"""Coverage for `POST /v1/unit_converters/length` and
+`POST /v1/unit_converters/temperature` (Handbook Part I.2 - Tier 1, no job
+queue, plain sync endpoints), plus their unit-validation and
 `verify_api_key` auth behavior.
 
 `GET /v1/unit_converters/test` is also covered as a smoke check that the
@@ -15,13 +16,20 @@ suite's convention (see `tests/test_miscellaneous_qr_code.py`) of exercising
 the real dependency against a real, fixture-created API key document rather
 than overriding it.
 
-Expected `result` values below are computed/measured, not loose tolerances,
-per this repo's established testing standard - each is either an exact
-real-world unit-conversion identity (1 mile = 1609.344 meters, 1 yard = 3
-feet, 1 mile = 5280 feet, 1 foot = 12 inches, 1 kilometer = 1000 meters) or
+Expected `result` values for length below are computed/measured, not loose
+tolerances, per this repo's established testing standard - each is either an
+exact real-world unit-conversion identity (1 mile = 1609.344 meters, 1 yard =
+3 feet, 1 mile = 5280 feet, 1 foot = 12 inches, 1 kilometer = 1000 meters) or
 independently computed from the router's own
 `result = value * units[from_unit] / units[to_unit]` formula rounded to 4
 decimal places (see `app/routers/unit_converters.py::convert_length`).
+
+Temperature is NOT a multiplier-through-origin conversion like length -
+Celsius/Fahrenheit/Kelvin are affine (offset-based: C->F is `x9/5 + 32`, C->K
+is `+273.15`). Expected values below are the well-known reference identities
+(0C = 32F = 273.15K, 100C = 212F = 373.15K, -40C = -40F = 233.15K - the point
+where the Celsius and Fahrenheit scales cross) rather than router-formula
+round-trips, since these are independently verifiable physical constants.
 """
 import pytest
 
@@ -170,6 +178,129 @@ async def test_missing_api_key_header_rejected(client):
     resp = await client.post(
         "/v1/unit_converters/length",
         json={"value": 1, "from_unit": "meter", "to_unit": "foot"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # Freezing point of water.
+        pytest.param(0, "celsius", "fahrenheit", 32.0, id="0c_to_32f"),
+        pytest.param(32, "fahrenheit", "celsius", 0.0, id="32f_to_0c"),
+        pytest.param(0, "celsius", "kelvin", 273.15, id="0c_to_273_15k"),
+        pytest.param(273.15, "kelvin", "celsius", 0.0, id="273_15k_to_0c"),
+        pytest.param(32, "fahrenheit", "kelvin", 273.15, id="32f_to_273_15k"),
+        pytest.param(273.15, "kelvin", "fahrenheit", 32.0, id="273_15k_to_32f"),
+        # Boiling point of water.
+        pytest.param(100, "celsius", "fahrenheit", 212.0, id="100c_to_212f"),
+        pytest.param(212, "fahrenheit", "celsius", 100.0, id="212f_to_100c"),
+        pytest.param(100, "celsius", "kelvin", 373.15, id="100c_to_373_15k"),
+        pytest.param(373.15, "kelvin", "celsius", 100.0, id="373_15k_to_100c"),
+        pytest.param(212, "fahrenheit", "kelvin", 373.15, id="212f_to_373_15k"),
+        pytest.param(373.15, "kelvin", "fahrenheit", 212.0, id="373_15k_to_212f"),
+        # -40 is the point where the Celsius and Fahrenheit scales cross
+        # (a non-trivial value distinct from the freezing/boiling anchors
+        # above).
+        pytest.param(-40, "celsius", "fahrenheit", -40.0, id="neg40c_to_neg40f"),
+        pytest.param(-40, "fahrenheit", "celsius", -40.0, id="neg40f_to_neg40c"),
+        pytest.param(-40, "celsius", "kelvin", 233.15, id="neg40c_to_233_15k"),
+        pytest.param(233.15, "kelvin", "celsius", -40.0, id="233_15k_to_neg40c"),
+        pytest.param(-40, "fahrenheit", "kelvin", 233.15, id="neg40f_to_233_15k"),
+        pytest.param(233.15, "kelvin", "fahrenheit", -40.0, id="233_15k_to_neg40f"),
+    ],
+)
+async def test_temperature_conversion_with_known_reference_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize("unit", ["celsius", "fahrenheit", "kelvin"])
+async def test_all_three_temperature_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 3
+    temperature units as both a valid `from_unit` and a valid `to_unit`
+    cheaply: any unit not in the router's `valid_units` set would 400 with
+    "Invalid unit" instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"value": 21, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 21.0
+
+
+async def test_temperature_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"value": 1, "from_unit": "rankine", "to_unit": "celsius"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_temperature_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"value": 1, "from_unit": "celsius", "to_unit": "rankine"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_temperature_missing_value_field_rejected_with_422(client, api_key):
+    """`TemperatureConvertRequest.value` has no default, so omitting it
+    entirely fails Pydantic validation before the handler body ever runs -
+    a 422, distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"from_unit": "celsius", "to_unit": "fahrenheit"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_temperature_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"value": 1, "from_unit": "celsius", "to_unit": "fahrenheit"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_temperature_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/temperature",
+        json={"value": 1, "from_unit": "celsius", "to_unit": "fahrenheit"},
     )
     assert resp.status_code == 422
     body = resp.json()
