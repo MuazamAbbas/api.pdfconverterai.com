@@ -1,5 +1,6 @@
-"""Coverage for `POST /v1/unit_converters/length` and
-`POST /v1/unit_converters/temperature` (Handbook Part I.2 - Tier 1, no job
+"""Coverage for `POST /v1/unit_converters/length`,
+`POST /v1/unit_converters/temperature`, and
+`POST /v1/unit_converters/weight` (Handbook Part I.2 - Tier 1, no job
 queue, plain sync endpoints), plus their unit-validation and
 `verify_api_key` auth behavior.
 
@@ -30,6 +31,15 @@ is `+273.15`). Expected values below are the well-known reference identities
 (0C = 32F = 273.15K, 100C = 212F = 373.15K, -40C = -40F = 233.15K - the point
 where the Celsius and Fahrenheit scales cross) rather than router-formula
 round-trips, since these are independently verifiable physical constants.
+
+Weight IS a multiplier-through-origin conversion like length (see
+`convert_weight`'s own `units` dict/formula) - exactly 4 units, confirmed
+live on the v1 production site
+(https://pdfconverterai.com/tools/unit-converter/weight-converter):
+kilogram (base, 1.0), gram (0.001), pound (0.45359237), ounce
+(0.028349523125). Expected values below are computed from that same
+`result = value * units[from_unit] / units[to_unit]` formula, rounded to 4
+decimal places.
 """
 import pytest
 
@@ -366,6 +376,133 @@ async def test_temperature_missing_from_unit_field_rejected_with_422(client, api
         "/v1/unit_converters/temperature",
         json={"value": 1, "to_unit": "fahrenheit"},
         headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize(
+    "value, from_unit, to_unit, expected",
+    [
+        # 1 kilogram = 1000 grams (1 / 0.001 == 1000.0 exactly).
+        pytest.param(1, "kilogram", "gram", 1000.0, id="kilogram_to_gram"),
+        # 1000 grams = 1 kilogram (inverse of the above).
+        pytest.param(1000, "gram", "kilogram", 1.0, id="gram_to_kilogram"),
+        # 1 kilogram = 2.2046 pounds (1 / 0.45359237 == 2.204622622...,
+        # rounded to 4dp per the router's own `round(result, 4)`).
+        pytest.param(1, "kilogram", "pound", 2.2046, id="kilogram_to_pound_rounded"),
+        # 1 pound = 0.4536 kilograms (0.45359237 / 1.0 == 0.45359237,
+        # rounded to 4dp).
+        pytest.param(1, "pound", "kilogram", 0.4536, id="pound_to_kilogram_rounded"),
+        # 1 kilogram = 35.274 ounces (1 / 0.028349523125 == 35.27396...,
+        # rounded to 4dp).
+        pytest.param(1, "kilogram", "ounce", 35.274, id="kilogram_to_ounce_rounded"),
+        # 1 ounce = 0.0283 kilograms (0.028349523125 / 1.0 == 0.028349523125,
+        # rounded to 4dp).
+        pytest.param(1, "ounce", "kilogram", 0.0283, id="ounce_to_kilogram_rounded"),
+        # 1 pound = 16 ounces exactly (0.45359237 / 0.028349523125 == 16.0
+        # exactly, by definition of these two router constants).
+        pytest.param(1, "pound", "ounce", 16.0, id="pound_to_ounce"),
+        # 16 ounces = 1 pound (inverse of the above).
+        pytest.param(16, "ounce", "pound", 1.0, id="ounce_to_pound"),
+        # 500 grams = 1.1023 pounds (500 * 0.001 / 0.45359237 ==
+        # 1.10231131..., rounded to 4dp).
+        pytest.param(500, "gram", "pound", 1.1023, id="gram_to_pound_rounded"),
+        # 5 pounds = 2267.9619 grams (5 * 0.45359237 / 0.001 == 2267.96185,
+        # rounded to 4dp).
+        pytest.param(5, "pound", "gram", 2267.9619, id="pound_to_gram_rounded"),
+    ],
+)
+async def test_weight_conversion_with_exact_expected_values(
+    client, api_key, value, from_unit, to_unit, expected
+):
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": value, "from_unit": from_unit, "to_unit": to_unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["from_unit"] == from_unit
+    assert body["to_unit"] == to_unit
+    assert body["result"] == expected
+
+
+@pytest.mark.parametrize("unit", ["kilogram", "gram", "pound", "ounce"])
+async def test_all_four_weight_units_accepted_as_from_and_to_unit(client, api_key, unit):
+    """Identity conversion (unit -> itself) exercises every one of the 4
+    weight units as both a valid `from_unit` and a valid `to_unit` cheaply:
+    any unit not in the router's `units` dict would 400 with "Invalid unit"
+    instead of returning a 200 with `result == value`."""
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 42, "from_unit": unit, "to_unit": unit},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == 42.0
+
+
+async def test_weight_invalid_from_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 1, "from_unit": "tonne", "to_unit": "kilogram"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_weight_invalid_to_unit_returns_400(client, api_key):
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 1, "from_unit": "kilogram", "to_unit": "stone"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Invalid unit"
+    assert body["error"]["code"] == "HTTP_ERROR"
+
+
+async def test_weight_missing_value_field_rejected_with_422(client, api_key):
+    """`WeightConvertRequest.value` has no default, so omitting it entirely
+    fails Pydantic validation before the handler body ever runs - a 422,
+    distinct from the handler's own 400 "Invalid unit" path."""
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"from_unit": "kilogram", "to_unit": "pound"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_weight_invalid_api_key_value_rejected_with_envelope(client):
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 1, "from_unit": "kilogram", "to_unit": "pound"},
+        headers={"X-API-Key": "not-a-real-key"},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+async def test_weight_missing_api_key_header_rejected(client):
+    resp = await client.post(
+        "/v1/unit_converters/weight",
+        json={"value": 1, "from_unit": "kilogram", "to_unit": "pound"},
     )
     assert resp.status_code == 422
     body = resp.json()

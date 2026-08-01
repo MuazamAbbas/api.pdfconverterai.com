@@ -7,6 +7,7 @@ from app.models.unit_converters import (
     ContextualConvertRequest,
     LengthConvertRequest,
     TemperatureConvertRequest,
+    WeightConvertRequest,
 )
 from app.services.unit_converters.contextual_convert import contextual_convert
 
@@ -91,6 +92,31 @@ async def convert_temperature(
     except Exception as e:
         logger.exception("💥 Error converting temperature: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Error converting temperature: {str(e)}")
+
+@router.post("/weight", summary="Convert weight between units")
+async def convert_weight(request: WeightConvertRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Converting weight: %s %s to %s", request.value, request.from_unit, request.to_unit)
+    units = {
+        "kilogram": 1.0,  # Base unit
+        "gram": 0.001,  # 1 kilogram = 1000 grams
+        "pound": 0.45359237,  # 1 pound = 0.45359237 kilograms
+        "ounce": 0.028349523125  # 1 ounce = 0.028349523125 kilograms
+    }
+    if request.from_unit not in units or request.to_unit not in units:
+        logger.error("❌ Invalid unit: %s or %s", request.from_unit, request.to_unit)
+        raise HTTPException(status_code=400, detail="Invalid unit")
+    try:
+        result = request.value * units[request.from_unit] / units[request.to_unit]
+        logger.debug("✅ Conversion result: %s %s = %s %s", request.value, request.from_unit, result, request.to_unit)
+        return {
+            "value": request.value,
+            "from_unit": request.from_unit,
+            "to_unit": request.to_unit,
+            "result": round(result, 4)
+        }
+    except Exception as e:
+        logger.exception("💥 Error converting weight: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Error converting weight: {str(e)}")
 
 @router.post("/convert", summary="Convert units using natural language query")
 async def contextual_convert_endpoint(request: ContextualConvertRequest, api_key: dict = Depends(verify_api_key)):
