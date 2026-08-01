@@ -26,5 +26,25 @@ class VolumeConvertRequest(BaseModel):
     from_unit: str
     to_unit: str
 
+class SpeedConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class TimeConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class DataConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+class EnergyConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
 class ContextualConvertRequest(BaseModel):
     query: str  # e.g., "convert 5 feet to meters"
