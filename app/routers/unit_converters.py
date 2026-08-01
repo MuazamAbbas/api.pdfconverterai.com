@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import verify_api_key
+from app.shared.responses import api_error
 from app.models.unit_converters import (
     AngleConvertRequest,
     AreaConvertRequest,
@@ -61,7 +62,7 @@ async def convert_length(request: LengthConvertRequest, api_key: dict = Depends(
         }
     except Exception as e:
         logger.exception("💥 Error converting length: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting length: {str(e)}")
+        raise api_error(500, "Failed to convert length", "CONVERSION_FAILED")
 
 @router.post("/temperature", summary="Convert temperature between units")
 async def convert_temperature(
@@ -106,7 +107,7 @@ async def convert_temperature(
         }
     except Exception as e:
         logger.exception("💥 Error converting temperature: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting temperature: {str(e)}")
+        raise api_error(500, "Failed to convert temperature", "CONVERSION_FAILED")
 
 @router.post("/weight", summary="Convert weight between units")
 async def convert_weight(request: WeightConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -131,7 +132,7 @@ async def convert_weight(request: WeightConvertRequest, api_key: dict = Depends(
         }
     except Exception as e:
         logger.exception("💥 Error converting weight: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting weight: {str(e)}")
+        raise api_error(500, "Failed to convert weight", "CONVERSION_FAILED")
 
 @router.post("/area", summary="Convert area between units")
 async def convert_area(request: AreaConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -157,7 +158,7 @@ async def convert_area(request: AreaConvertRequest, api_key: dict = Depends(veri
         }
     except Exception as e:
         logger.exception("💥 Error converting area: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting area: {str(e)}")
+        raise api_error(500, "Failed to convert area", "CONVERSION_FAILED")
 
 @router.post("/volume", summary="Convert volume between units")
 async def convert_volume(request: VolumeConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -183,7 +184,7 @@ async def convert_volume(request: VolumeConvertRequest, api_key: dict = Depends(
         }
     except Exception as e:
         logger.exception("💥 Error converting volume: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting volume: {str(e)}")
+        raise api_error(500, "Failed to convert volume", "CONVERSION_FAILED")
 
 @router.post("/speed", summary="Convert speed between units")
 async def convert_speed(request: SpeedConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -208,7 +209,7 @@ async def convert_speed(request: SpeedConvertRequest, api_key: dict = Depends(ve
         }
     except Exception as e:
         logger.exception("💥 Error converting speed: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting speed: {str(e)}")
+        raise api_error(500, "Failed to convert speed", "CONVERSION_FAILED")
 
 @router.post("/time", summary="Convert time between units")
 async def convert_time(request: TimeConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -234,7 +235,7 @@ async def convert_time(request: TimeConvertRequest, api_key: dict = Depends(veri
         }
     except Exception as e:
         logger.exception("💥 Error converting time: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting time: {str(e)}")
+        raise api_error(500, "Failed to convert time", "CONVERSION_FAILED")
 
 @router.post("/data", summary="Convert data storage size between units")
 async def convert_data(request: DataConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -260,7 +261,7 @@ async def convert_data(request: DataConvertRequest, api_key: dict = Depends(veri
         }
     except Exception as e:
         logger.exception("💥 Error converting data: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting data: {str(e)}")
+        raise api_error(500, "Failed to convert data", "CONVERSION_FAILED")
 
 @router.post("/energy", summary="Convert energy between units")
 async def convert_energy(request: EnergyConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -286,7 +287,7 @@ async def convert_energy(request: EnergyConvertRequest, api_key: dict = Depends(
         }
     except Exception as e:
         logger.exception("💥 Error converting energy: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting energy: {str(e)}")
+        raise api_error(500, "Failed to convert energy", "CONVERSION_FAILED")
 
 @router.post("/power", summary="Convert power between units")
 async def convert_power(request: PowerConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -311,7 +312,7 @@ async def convert_power(request: PowerConvertRequest, api_key: dict = Depends(ve
         }
     except Exception as e:
         logger.exception("💥 Error converting power: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting power: {str(e)}")
+        raise api_error(500, "Failed to convert power", "CONVERSION_FAILED")
 
 @router.post("/pressure", summary="Convert pressure between units")
 async def convert_pressure(request: PressureConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -336,7 +337,7 @@ async def convert_pressure(request: PressureConvertRequest, api_key: dict = Depe
         }
     except Exception as e:
         logger.exception("💥 Error converting pressure: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting pressure: {str(e)}")
+        raise api_error(500, "Failed to convert pressure", "CONVERSION_FAILED")
 
 @router.post("/frequency", summary="Convert frequency between units")
 async def convert_frequency(request: FrequencyConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -361,7 +362,7 @@ async def convert_frequency(request: FrequencyConvertRequest, api_key: dict = De
         }
     except Exception as e:
         logger.exception("💥 Error converting frequency: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting frequency: {str(e)}")
+        raise api_error(500, "Failed to convert frequency", "CONVERSION_FAILED")
 
 @router.post("/force", summary="Convert force between units")
 async def convert_force(request: ForceConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -386,7 +387,7 @@ async def convert_force(request: ForceConvertRequest, api_key: dict = Depends(ve
         }
     except Exception as e:
         logger.exception("💥 Error converting force: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting force: {str(e)}")
+        raise api_error(500, "Failed to convert force", "CONVERSION_FAILED")
 
 @router.post("/torque", summary="Convert torque between units")
 async def convert_torque(request: TorqueConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -411,7 +412,7 @@ async def convert_torque(request: TorqueConvertRequest, api_key: dict = Depends(
         }
     except Exception as e:
         logger.exception("💥 Error converting torque: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting torque: {str(e)}")
+        raise api_error(500, "Failed to convert torque", "CONVERSION_FAILED")
 
 @router.post("/density", summary="Convert density between units")
 async def convert_density(request: DensityConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -436,7 +437,7 @@ async def convert_density(request: DensityConvertRequest, api_key: dict = Depend
         }
     except Exception as e:
         logger.exception("💥 Error converting density: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting density: {str(e)}")
+        raise api_error(500, "Failed to convert density", "CONVERSION_FAILED")
 
 @router.post("/flow_rate", summary="Convert flow rate between units")
 async def convert_flow_rate(request: FlowRateConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -461,7 +462,7 @@ async def convert_flow_rate(request: FlowRateConvertRequest, api_key: dict = Dep
         }
     except Exception as e:
         logger.exception("💥 Error converting flow rate: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting flow rate: {str(e)}")
+        raise api_error(500, "Failed to convert flow rate", "CONVERSION_FAILED")
 
 @router.post("/angle", summary="Convert angle between units")
 async def convert_angle(request: AngleConvertRequest, api_key: dict = Depends(verify_api_key)):
@@ -486,7 +487,7 @@ async def convert_angle(request: AngleConvertRequest, api_key: dict = Depends(ve
         }
     except Exception as e:
         logger.exception("💥 Error converting angle: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting angle: {str(e)}")
+        raise api_error(500, "Failed to convert angle", "CONVERSION_FAILED")
 
 @router.post("/fuel_efficiency", summary="Convert fuel efficiency between units")
 async def convert_fuel_efficiency(
@@ -558,7 +559,7 @@ async def convert_fuel_efficiency(
         )
     except Exception as e:
         logger.exception("💥 Error converting fuel efficiency: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting fuel efficiency: {str(e)}")
+        raise api_error(500, "Failed to convert fuel efficiency", "CONVERSION_FAILED")
 
 @router.post("/convert", summary="Convert units using natural language query")
 async def contextual_convert_endpoint(request: ContextualConvertRequest, api_key: dict = Depends(verify_api_key)):
