@@ -33,6 +33,6 @@ async def analyze_sentiment_service(text: str) -> dict:
         }
         logger.debug("Sentiment analysis result: %s", result)
         return result
-    except Exception as e:
-        logger.exception("Error analyzing sentiment: %s", str(e))
-        raise ValueError(f"Error analyzing sentiment: {str(e)}")
+    except Exception:
+        logger.exception("Error analyzing sentiment")
+        raise
