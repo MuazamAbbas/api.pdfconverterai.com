@@ -34,6 +34,6 @@ async def correct_grammar(text: str) -> dict:
             })
         logger.debug("Grammar corrections: %s", corrections)
         return {"text": text, "corrections": corrections}
-    except Exception as e:
-        logger.exception("Error correcting grammar: %s", str(e))
-        raise ValueError(f"Error correcting grammar: {str(e)}")
+    except Exception:
+        logger.exception("Error correcting grammar")
+        raise
