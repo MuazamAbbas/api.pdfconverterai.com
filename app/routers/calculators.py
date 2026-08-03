@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 
 from app.core.security import verify_api_key
+from app.shared.responses import api_error
 from app.models.calculators import (
     AgeCalculatorRequest,
     BMICalculatorRequest,
@@ -41,7 +42,7 @@ async def calculate_age_endpoint(request: AgeCalculatorRequest, api_key: dict = 
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error calculating age: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error calculating age: {str(e)}")
+        raise api_error(500, "Failed to calculate age", "CALCULATION_FAILED")
 
 @router.post("/percentage", summary="Calculate percentage of a value")
 async def calculate_percentage_endpoint(request: PercentageCalculatorRequest, api_key: dict = Depends(verify_api_key)):
@@ -55,7 +56,7 @@ async def calculate_percentage_endpoint(request: PercentageCalculatorRequest, ap
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error calculating percentage: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error calculating percentage: {str(e)}")
+        raise api_error(500, "Failed to calculate percentage", "CALCULATION_FAILED")
 
 @router.post("/loan", summary="Calculate loan payment")
 async def calculate_loan_endpoint(request: LoanCalculatorRequest, api_key: dict = Depends(verify_api_key)):
@@ -69,7 +70,7 @@ async def calculate_loan_endpoint(request: LoanCalculatorRequest, api_key: dict 
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error calculating loan: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error calculating loan: {str(e)}")
+        raise api_error(500, "Failed to calculate loan", "CALCULATION_FAILED")
 
 @router.post("/bmi", summary="Calculate BMI")
 async def calculate_bmi_endpoint(request: BMICalculatorRequest, api_key: dict = Depends(verify_api_key)):
@@ -83,7 +84,7 @@ async def calculate_bmi_endpoint(request: BMICalculatorRequest, api_key: dict = 
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error calculating BMI: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error calculating BMI: {str(e)}")
+        raise api_error(500, "Failed to calculate BMI", "CALCULATION_FAILED")
 
 @router.post("/financial_plan", summary="Calculate investment with sentiment adjustment")
 async def financial_plan(request: FinancialPlanRequest, app: FastAPI = Depends(get_app), api_key: dict = Depends(verify_api_key)):
@@ -101,4 +102,4 @@ async def financial_plan(request: FinancialPlanRequest, app: FastAPI = Depends(g
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error calculating financial plan: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error calculating financial plan: {str(e)}")
+        raise api_error(500, "Failed to calculate financial plan", "CALCULATION_FAILED")

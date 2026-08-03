@@ -59,6 +59,26 @@ path specifically (mirroring every other endpoint 1:1), the forced-500 test
 uses a genuine cross-unit `mpg` -> `km_per_liter` payload for that one row
 instead of the identity pair used for the valid-value regression check.
 
+**`/convert` (`contextual_convert_endpoint`, issue #29 fast-follow):** the
+18 endpoints above were fixed in PR #28 (issue #27); `POST
+/v1/unit_converters/convert` - a 19th endpoint in this same router, the
+NLP/contextual query one, backed by `app/services/unit_converters/
+contextual_convert.py::contextual_convert()` rather than the shared
+`units` dict multiplier tables above - was deliberately left out of that
+batch and is fixed here instead (see `app/routers/calculators.py`'s
+robustness fixes in `tests/test_calculators_robustness.py` for the other
+half of issue #29). Its `except ValueError` -> 400 branch is untouched
+(traced to `contextual_convert()`'s own two static, safe, user-facing
+strings - `"Query must include a value and two units"` and `"Unsupported
+units"` - not an exception-text leak); only its `except Exception` -> 500
+branch got the same `api_error(500, "Failed to convert units",
+"CONVERSION_FAILED")` swap as the other 18. The forced-500 test below
+shadows `round` on `contextual_convert`'s own module (not
+`app.routers.unit_converters`, since `/convert`'s conversion math lives in
+the service module, not the router) - same shadowing technique as the 18
+endpoints above, for the same reason (no reachable internal failure mode
+with valid input otherwise).
+
 **Forcing a genuine 500 without mocking `api_error` itself:** none of the
 18 handlers has a reachable internal failure mode with valid, in-bound,
 finite input post-fix - every `units` dict multiplier is a nonzero
@@ -333,3 +353,68 @@ async def test_generic_exception_returns_500_without_leaking_exception_text(
     assert "db_password" not in resp.text
     assert "RuntimeError" not in resp.text
     assert "unit_converters.py" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# /convert (contextual_convert_endpoint) - issue #29 fast-follow. See module
+# docstring's "/convert" section above for why this endpoint needed its own
+# forced-500 technique (shadowing `round` on the service module, not the
+# router module) instead of being folded into the parametrized ENDPOINTS
+# table above.
+# ---------------------------------------------------------------------------
+
+async def test_convert_valid_query_still_returns_200_with_correct_result(client, api_key):
+    """Regression check: an ordinary, valid natural-language query still
+    returns 200 with the correct conversion result after the fix - the fix
+    only touches the `except Exception` -> 500 branch, never the happy
+    path."""
+    resp = await client.post(
+        "/v1/unit_converters/convert",
+        json={"query": "convert 5 feet to meters"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["value"] == 5.0
+    assert body["from_unit"] == "feet"
+    assert body["to_unit"] == "meters"
+    assert body["result"] == 1.524
+
+
+async def test_convert_generic_exception_returns_500_without_leaking_exception_text(
+    client, api_key, monkeypatch
+):
+    """Forces a genuine exception inside `contextual_convert()`'s own try
+    block by shadowing the module-global `round` on
+    `app.services.unit_converters.contextual_convert` (the module that
+    actually does `round(result, 4)` for this endpoint - not
+    `app.routers.unit_converters`), and confirms the response is the new
+    safe `api_error(500, "Failed to convert units", "CONVERSION_FAILED")`
+    envelope - never the old `f"Error converting units: {str(e)}"` shape,
+    and never any fragment of the forced exception's message (including a
+    fake secret planted in it) in the response body."""
+    import app.services.unit_converters.contextual_convert as contextual_convert_module
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError(
+            "SECRET_MARKER_never_reach_the_client db_password=hunter2 at "
+            "/app/services/unit_converters/contextual_convert.py"
+        )
+
+    monkeypatch.setattr(contextual_convert_module, "round", _boom, raising=False)
+
+    resp = await client.post(
+        "/v1/unit_converters/convert",
+        json={"query": "convert 5 feet to meters"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 500, f"expected 500, got {resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Failed to convert units"
+    assert body["error"]["code"] == "CONVERSION_FAILED"
+    assert "SECRET_MARKER" not in resp.text
+    assert "hunter2" not in resp.text
+    assert "db_password" not in resp.text
+    assert "RuntimeError" not in resp.text
+    assert "contextual_convert.py" not in resp.text
