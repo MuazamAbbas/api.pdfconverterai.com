@@ -3,7 +3,6 @@ import logging
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 
 from app.core.security import verify_api_key
-from app.shared.responses import api_error
 from app.models.calculators import (
     AgeCalculatorRequest,
     BMICalculatorRequest,
@@ -16,6 +15,7 @@ from app.services.calculators.bmi import calculate_bmi
 from app.services.calculators.financial_plan import FinancialPlanCalculator
 from app.services.calculators.loan import calculate_loan
 from app.services.calculators.percentage import calculate_percentage
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
