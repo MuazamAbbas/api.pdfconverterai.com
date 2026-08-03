@@ -573,4 +573,4 @@ async def contextual_convert_endpoint(request: ContextualConvertRequest, api_key
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error converting units: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting units: {str(e)}")
+        raise api_error(500, "Failed to convert units", "CONVERSION_FAILED")

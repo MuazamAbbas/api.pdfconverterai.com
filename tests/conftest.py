@@ -38,6 +38,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
 from app.core.database import db
+from app.routers import calculators as calculators_router
 from app.routers import downloaders as downloaders_router
 from app.routers import files as files_router
 from app.routers import image as image_router
@@ -62,7 +63,14 @@ def build_test_app() -> FastAPI:
     startup-time model preloading / unrelated routers that make the real
     `app.main` unimportable in this environment, and now `unit_converters`
     for the length-converter test suite - also a Tier 1 sync endpoint, no
-    Job System plumbing needed, just the router mount itself."""
+    Job System plumbing needed, just the router mount itself. `calculators`
+    added for issue #29's error-leak fast-follow (tests/test_calculators_
+    robustness.py) - also Tier 1 sync, no Job System plumbing; note its
+    `/financial_plan` endpoint's own `Depends(get_app)` does `from app.main
+    import app` internally, which still isn't importable in this checkout
+    (see docstring above) - that one test monkeypatches
+    `app.routers.calculators.get_app` itself to sidestep the broken import,
+    same spirit as this fixture's whole reason for existing."""
     app = FastAPI()
     app.include_router(files_router.router, prefix="/v1")
     app.include_router(jobs_router.router, prefix="/v1")
@@ -73,6 +81,7 @@ def build_test_app() -> FastAPI:
     app.include_router(web_tools_router.router, prefix="/v1")
     app.include_router(downloaders_router.router, prefix="/v1")
     app.include_router(unit_converters_router.router, prefix="/v1")
+    app.include_router(calculators_router.router, prefix="/v1")
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
