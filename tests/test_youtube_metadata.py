@@ -8,49 +8,29 @@ now bare re-raises the original exception - and `app.routers.video.
 youtube_metadata`'s 500 branch no longer interpolates `str(e)` into the
 `HTTPException` detail, using `api_error(...)` instead.
 
-IMPORTANT - separate, pre-existing bug discovered while writing this suite
-(unrelated to the Batch 2 diff, confirmed via `git show dc0322f` - neither
-line was touched by that commit): `youtube_metadata`'s route signature is
-`url: HttpUrl` (a bare, non-model parameter, so FastAPI/Starlette binds it
-as a query param and coerces it via Pydantic v2's `HttpUrl` type), but
-`fetch_youtube_metadata(url: str)` immediately calls `url.startswith(...)`
-on it. Pydantic v2's `HttpUrl` is NOT a `str` subclass (unlike Pydantic
-v1), so this raises `AttributeError: 'HttpUrl' object has no attribute
-'startswith'` - for every single call, valid YouTube URLs included. This
-line sits *outside* `fetch_youtube_metadata`'s own `try` block, so it
-propagates straight past the service's exception handling into the
-router's `except Exception` branch. Net effect: **`/v1/video/
-youtube_metadata` cannot currently return either the intended 400
-(invalid URL) or a real 200 - every real HTTP request to this endpoint
-returns 500**, confirmed empirically below. This should be flagged to
-backend-builder as a functional bug (fix: convert `url` to `str(url)`
-before calling `fetch_youtube_metadata`, or change the service's
-signature/usage) - it is NOT something this test session fixes, since it
-is outside the scope of the Batch 2 error-leak diff.
+RESOLVED (issue #34) - a separate, pre-existing bug was discovered while
+writing this suite (unrelated to the Batch 2 diff, confirmed via `git show
+dc0322f` - neither line was touched by that commit): `youtube_metadata`'s
+route signature is `url: HttpUrl` (a bare, non-model parameter, so
+FastAPI/Starlette binds it as a query param and coerces it via Pydantic
+v2's `HttpUrl` type), but `fetch_youtube_metadata(url: str)` immediately
+called `url.startswith(...)` on it. Pydantic v2's `HttpUrl` is NOT a `str`
+subclass (unlike Pydantic v1), so this raised `AttributeError: 'HttpUrl'
+object has no attribute 'startswith'` for every single call, valid
+YouTube URLs included, meaning every real HTTP request to this endpoint
+returned 500. Fixed in `app/routers/video.py` by converting the coerced
+`HttpUrl` to `str(url)` before calling `fetch_youtube_metadata`. This is
+now verified empirically below with a real, non-mocked network call
+(`test_youtube_metadata_http_valid_request_returns_real_metadata`) that
+asserts a real 200 with real metadata.
 
-One silver lining Batch 2's router fix does still verifiably provide: since
-the AttributeError is an unhandled `Exception` (not a `ValueError`), it now
-gets caught by the router's *fixed* generic branch and returns the generic
-`api_error` envelope with no leaked exception text - so
-`test_youtube_metadata_http_currently_always_returns_500_due_to_httpurl_
-str_mismatch` below both documents the bug and confirms that whatever
-exception reaches that branch, nothing is leaked.
-
-Because that pre-existing bug makes it impossible to reach the intended
-400/200 branches through a real HTTP request, the three regression cases
-that actually exercise the Batch 2 diff (validation still works /
-unexpected-failure-no-longer-leaks / happy path) are driven by calling
-`app.routers.video.youtube_metadata` (the real, unmodified route function)
-directly as a plain coroutine with a plain `str` url - i.e. the same value
-`fetch_youtube_metadata` is annotated to expect and the value it would
-receive if the HttpUrl/str bug above were fixed - bypassing only the
-FastAPI request-parsing layer responsible for the separate bug, not any
-of the logic this task is actually testing. This is a deliberate,
-documented compromise per the task brief's "say so as a finding rather
-than writing a weak test to force a pass" rule: the HTTP-level tests for
-those three cases would either be weak (asserting a 500 that happens for
-the wrong reason) or impossible (400/200 unreachable at all) if forced
-through the real request path.
+The three regression cases that exercise the Batch 2 error-leak diff
+itself (validation still works / unexpected-failure-no-longer-leaks /
+happy path) remain driven by calling `app.routers.video.youtube_metadata`
+(the real, unmodified route function) directly as a plain coroutine with a
+plain `str` url, so they stay independent of the FastAPI query-param
+coercion layer and continue to exercise only the router/service logic
+Batch 2 actually changed.
 """
 import os
 
@@ -155,39 +135,33 @@ class _FakeYoutubeDL:
         }
 
 
-# --- documents the pre-existing HttpUrl/str bug (real HTTP layer) ----------
+# --- real HTTP-level happy path (live network, issue #34 fix) --------------
 
 
 @asyncio_session
-async def test_youtube_metadata_http_currently_always_returns_500_due_to_httpurl_str_mismatch(
+async def test_youtube_metadata_http_valid_request_returns_real_metadata(
     video_client, api_key
 ):
-    """Bug-documentation test, not a Batch 2 regression test: a real HTTP
-    request with a syntactically valid, real YouTube URL still returns 500
-    today, because FastAPI coerces `url` into a `pydantic.HttpUrl` before
-    `fetch_youtube_metadata` calls `.startswith()` on it. If/when
-    backend-builder fixes that type mismatch, this test should start
-    failing (500 -> 200) and should be replaced by a real HTTP-level 200
-    test at that point.
-
-    Still asserts the one thing that *is* in scope here: whatever exception
-    reaches the router (AttributeError today), Batch 2's fix means it comes
-    back as the safe, generic `api_error` envelope - no leaked exception
-    text.
+    """Real HTTP-level happy path over the live network - no mocking of
+    `yt_dlp.YoutubeDL` here, deliberately, unlike every other test in this
+    file. Confirms the issue #34 fix (`str(url)` before
+    `fetch_youtube_metadata`) actually works end-to-end: FastAPI coerces
+    `url` into a `pydantic.HttpUrl`, the router converts it back to `str`,
+    and `fetch_youtube_metadata` successfully calls real `yt_dlp` against a
+    real, stable, public YouTube video and gets real metadata back.
     """
     resp = await video_client.post(
         "/v1/video/youtube_metadata",
         params={"url": _VALID_URL},
         headers={"X-API-Key": api_key["key"]},
     )
-    assert resp.status_code == 500, resp.text
+    assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["success"] is False
-    assert body["message"] == "Failed to fetch YouTube metadata"
-    assert body["error"]["code"] == "YOUTUBE_METADATA_FAILED"
-    assert "startswith" not in resp.text
-    assert "AttributeError" not in resp.text
-    assert "HttpUrl" not in resp.text
+
+    assert isinstance(body["title"], str) and body["title"].strip() != ""
+    assert isinstance(body["description"], str) and body["description"].strip() != ""
+    assert isinstance(body["duration_seconds"], int) and body["duration_seconds"] > 0
+    assert body["url"] == _VALID_URL
 
 
 # --- service-level regression test: real exception type propagates ---------

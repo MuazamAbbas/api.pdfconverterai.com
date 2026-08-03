@@ -32,7 +32,7 @@ async def youtube_metadata(url: HttpUrl, api_key: dict = Depends(verify_api_key)
     """
     logger.debug("📹 Fetching YouTube metadata for URL: %s", url)
     try:
-        metadata = await fetch_youtube_metadata(url)
+        metadata = await fetch_youtube_metadata(str(url))
         logger.debug("✅ Metadata fetched: %s", metadata)
         return metadata
     except ValueError as e:
