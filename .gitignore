@@ -41,11 +41,5 @@ __pycache__/
 # confirmed no such nested dir exists today (same bug class as models/ above).
 /.well-known/
 
-# yt-dlp session cookie jar (Netscape format) - refreshed at runtime by the
-# bgutil-pot PO Token provider on every real download/metadata call, so it's
-# always dirty in the working tree. Not source code; tracking it forced a
-# stash-before-pull dance on every VPS deploy (see SPRINT_STATUS.md).
-/app/config/cookies.txt
-
 # OS/editor cruft
 .DS_Store
