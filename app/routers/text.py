@@ -35,7 +35,7 @@ async def test_text(api_key: dict = Depends(verify_api_key)):
         return response
     except Exception as e:
         logger.exception("💥 Error in test endpoint: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error in test endpoint: {str(e)}")
+        raise api_error(500, "Test endpoint failed", "TEXT_PROCESSING_FAILED")
 
 @router.post("/upload", summary="Upload text input for paraphrase/summarize jobs")
 async def upload_text(payload: TextUploadRequest, api_key: dict = Depends(verify_api_key)):
@@ -116,7 +116,7 @@ async def grammar(request: TextRequest, api_key: dict = Depends(verify_api_key))
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error correcting grammar: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error correcting grammar: {str(e)}")
+        raise api_error(500, "Failed to correct grammar", "TEXT_PROCESSING_FAILED")
 
 @router.post(
     "/word_count",
@@ -139,7 +139,7 @@ async def word_count_endpoint(request: TextRequest, api_key: dict = Depends(veri
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error counting words: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error counting words: {str(e)}")
+        raise api_error(500, "Failed to count words", "TEXT_PROCESSING_FAILED")
 
 @router.post(
     "/char_count",
@@ -162,7 +162,7 @@ async def char_count_endpoint(request: TextRequest, api_key: dict = Depends(veri
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error counting characters: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error counting characters: {str(e)}")
+        raise api_error(500, "Failed to count characters", "TEXT_PROCESSING_FAILED")
 
 @router.post(
     "/sentence_count",
@@ -185,7 +185,7 @@ async def sentence_count_endpoint(request: TextRequest, api_key: dict = Depends(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error counting sentences: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error counting sentences: {str(e)}")
+        raise api_error(500, "Failed to count sentences", "TEXT_PROCESSING_FAILED")
 
 @router.post(
     "/paragraph_count",
@@ -208,4 +208,4 @@ async def paragraph_count_endpoint(request: TextRequest, api_key: dict = Depends
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error counting paragraphs: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error counting paragraphs: {str(e)}")
+        raise api_error(500, "Failed to count paragraphs", "TEXT_PROCESSING_FAILED")

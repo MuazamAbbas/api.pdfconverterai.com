@@ -38,14 +38,19 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
 from app.core.database import db
+from app.routers import binary_tools as binary_tools_router
 from app.routers import calculators as calculators_router
+from app.routers import categories as categories_router
+from app.routers import cyber_security as cyber_security_router
 from app.routers import downloaders as downloaders_router
 from app.routers import files as files_router
 from app.routers import image as image_router
 from app.routers import jobs as jobs_router
 from app.routers import miscellaneous as miscellaneous_router
 from app.routers import pdf as pdf_router
+from app.routers import seo_tools as seo_tools_router
 from app.routers import text as text_router
+from app.routers import tools as tools_router
 from app.routers import unit_converters as unit_converters_router
 from app.routers import web_tools as web_tools_router
 
@@ -70,7 +75,10 @@ def build_test_app() -> FastAPI:
     import app` internally, which still isn't importable in this checkout
     (see docstring above) - that one test monkeypatches
     `app.routers.calculators.get_app` itself to sidestep the broken import,
-    same spirit as this fixture's whole reason for existing."""
+    same spirit as this fixture's whole reason for existing. `cyber_security`,
+    `binary_tools`, `categories`, `tools`, and `seo_tools` added for issue
+    #31's error-leak sweep (Batch 1/3) - all five are Tier 1 sync routers,
+    no Job System plumbing needed, just the router mount itself."""
     app = FastAPI()
     app.include_router(files_router.router, prefix="/v1")
     app.include_router(jobs_router.router, prefix="/v1")
@@ -82,6 +90,11 @@ def build_test_app() -> FastAPI:
     app.include_router(downloaders_router.router, prefix="/v1")
     app.include_router(unit_converters_router.router, prefix="/v1")
     app.include_router(calculators_router.router, prefix="/v1")
+    app.include_router(cyber_security_router.router, prefix="/v1")
+    app.include_router(binary_tools_router.router, prefix="/v1")
+    app.include_router(categories_router.router, prefix="/v1")
+    app.include_router(tools_router.router, prefix="/v1")
+    app.include_router(seo_tools_router.router, prefix="/v1")
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):

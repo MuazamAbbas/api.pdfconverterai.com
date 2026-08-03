@@ -5,6 +5,7 @@ import string
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import verify_api_key
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
@@ -28,4 +29,4 @@ async def password_generator(length: int = 12, api_key: dict = Depends(verify_ap
         return {"password": password}
     except Exception as e:
         logger.exception("💥 Error generating password: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error generating password: {str(e)}")
+        raise api_error(500, "Failed to generate password", "PASSWORD_GENERATION_FAILED")

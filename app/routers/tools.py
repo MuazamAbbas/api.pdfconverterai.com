@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Depends
 
 from app.core.security import verify_api_key
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
@@ -33,4 +34,4 @@ async def list_tools(api_key: dict = Depends(verify_api_key)):
         return {"tools": tools}
     except Exception as e:
         logger.exception("💥 Error listing tools: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error listing tools: {str(e)}")
+        raise api_error(500, "Failed to list tools", "TOOLS_LIST_FAILED")
