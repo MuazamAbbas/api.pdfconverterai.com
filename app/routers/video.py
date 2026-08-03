@@ -5,6 +5,7 @@ from pydantic import HttpUrl
 
 from app.core.security import verify_api_key
 from app.services.video.youtube_metadata import fetch_youtube_metadata
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
@@ -39,4 +40,4 @@ async def youtube_metadata(url: HttpUrl, api_key: dict = Depends(verify_api_key)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("Unexpected error in youtube_metadata: %s", str(e))
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise api_error(500, "Failed to fetch YouTube metadata", "YOUTUBE_METADATA_FAILED")

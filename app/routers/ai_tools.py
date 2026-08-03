@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app.core.security import verify_api_key
 from app.services.ai_tools.sentiment import analyze_sentiment_service
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
@@ -31,4 +32,4 @@ async def sentiment_analysis(request: TextRequest, api_key: dict = Depends(verif
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error analyzing sentiment: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error analyzing sentiment: {str(e)}")
+        raise api_error(500, "Failed to analyze sentiment", "SENTIMENT_ANALYSIS_FAILED")
