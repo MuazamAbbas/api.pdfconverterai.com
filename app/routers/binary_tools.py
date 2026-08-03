@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.core.security import verify_api_key
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
@@ -29,4 +30,4 @@ async def text_to_binary(request: TextToBinaryRequest, api_key: dict = Depends(v
         return {"text": request.text, "binary": binary}
     except Exception as e:
         logger.exception("💥 Error converting text to binary: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error converting text to binary: {str(e)}")
+        raise api_error(500, "Failed to convert text to binary", "BINARY_CONVERSION_FAILED")

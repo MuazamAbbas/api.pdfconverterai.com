@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from app.core.security import verify_api_key
 from app.services.seo.keyword_density import keyword_density
 from app.services.seo.keyword_extract import extract_keywords_service
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ async def calculate_keyword_density(request: KeywordDensityRequest, api_key: dic
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error calculating keyword density: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error calculating keyword density: {str(e)}")
+        raise api_error(500, "Failed to calculate keyword density", "SEO_ANALYSIS_FAILED")
 
 @router.post("/keyword_extract", summary="Extract keywords from text")
 async def keyword_extract(request: KeywordExtractRequest, api_key: dict = Depends(verify_api_key)):
@@ -43,4 +44,4 @@ async def keyword_extract(request: KeywordExtractRequest, api_key: dict = Depend
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.exception("💥 Error extracting keywords: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error extracting keywords: {str(e)}")
+        raise api_error(500, "Failed to extract keywords", "SEO_ANALYSIS_FAILED")

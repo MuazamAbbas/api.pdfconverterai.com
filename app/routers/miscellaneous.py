@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.core.security import verify_api_key
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ async def get_timestamp(api_key: dict = Depends(verify_api_key)):
         return {"timestamp": timestamp}
     except Exception as e:
         logger.exception("💥 Error generating timestamp: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error generating timestamp: {str(e)}")
+        raise api_error(500, "Failed to generate timestamp", "TIMESTAMP_GENERATION_FAILED")
 
 @router.post("/qr_code", summary="Generate a QR code PNG image from text")
 async def generate_qr_code(payload: QRCodeRequest, api_key: dict = Depends(verify_api_key)):

@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Depends
 
 from app.core.security import verify_api_key
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 
@@ -26,4 +27,4 @@ async def list_categories(api_key: dict = Depends(verify_api_key)):
         return {"categories": categories}
     except Exception as e:
         logger.exception("💥 Error listing categories: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error listing categories: {str(e)}")
+        raise api_error(500, "Failed to list categories", "CATEGORIES_LIST_FAILED")
