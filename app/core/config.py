@@ -29,11 +29,6 @@ class Settings(BaseSettings):
     downloaders_log_path: str = (
         "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/logs/error.log"
     )
-    # yt_dlp cookie file consumed by the worker-side downloaders_youtube
-    # Processor (Handbook Part C.4) so age/region-restricted videos resolve.
-    youtube_cookie_file: str = (
-        "/home/pdfconverterai-api/htdocs/api.pdfconverterai.com/app/config/cookies.txt"
-    )
     # Node.js binary used by yt_dlp's `js_runtimes` option (via the
     # `yt-dlp-ejs` package) to solve YouTube's signature/n-parameter
     # challenges for the `web` player client - required, alongside the

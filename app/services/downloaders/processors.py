@@ -139,17 +139,16 @@ class DownloadersYoutubeProcessor(Processor):
                 "youtubepot-bgutilhttp": {"base_url": [settings.bgutil_pot_provider_url]},
             },
         }
-        # Only pass a cookiefile if it actually exists on disk - yt_dlp
-        # raises at YoutubeDL init time if a configured cookiefile path is
-        # missing, and local/dev environments won't necessarily have
-        # `settings.youtube_cookie_file` present.
-        if os.path.exists(settings.youtube_cookie_file):
-            ydl_opts["cookiefile"] = settings.youtube_cookie_file
-        else:
-            logger.debug(
-                "youtube_cookie_file %s not found - proceeding without cookies",
-                settings.youtube_cookie_file,
-            )
+        # No cookiefile, deliberately (2026-08-03 investigation, see
+        # SPRINT_STATUS.md): downloads use only the PO Token provider +
+        # forced `web` client below. A real yt-dlp cookiefile means a real
+        # Google account session sitting on the server - the exact class of
+        # credential that caused the earlier exposure incident - and testing
+        # showed it wasn't even buying reliability (bot-checks still hit
+        # ~2/3 of normal videos with cookies in place, because the session
+        # in the file had already expired). Age-restricted videos will
+        # always fail without one; accepted as a known limitation rather
+        # than reintroducing a live account credential.
         # Only enable the `node` JS runtime (needed by the `yt-dlp-ejs`
         # package to solve YouTube's signature/n-parameter challenges for
         # the `web` client) if the configured Node.js binary actually
@@ -158,7 +157,7 @@ class DownloadersYoutubeProcessor(Processor):
         # still runs but silently loses some formats (see the "Signature
         # solving failed" warning found during investigation) rather than
         # hard-failing, so this is a best-effort enhancement, not a
-        # hard requirement the way cookiefile/PO-Token-provider are.
+        # hard requirement the way the PO-Token provider is.
         if os.path.exists(settings.youtube_js_runtime_node_path):
             ydl_opts["js_runtimes"] = {"node": {"path": settings.youtube_js_runtime_node_path}}
         else:
