@@ -34,6 +34,6 @@ async def fetch_youtube_metadata(url: str) -> Dict:
             }
         logger.debug("Fetched metadata: %s", metadata)
         return metadata
-    except Exception as e:
-        logger.exception("Error fetching YouTube metadata: %s", str(e))
-        raise ValueError(f"Error fetching metadata: {str(e)}")
+    except Exception:
+        logger.exception("Error fetching YouTube metadata")
+        raise

@@ -59,6 +59,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.routers import ai_tools as ai_tools_router
 from app.routers import text as text_router
+import app.services.ai_tools.sentiment as sentiment_service
 from tests.conftest import _cleanup_api_key, _make_api_key
 
 # Applied per-async-test (not as a blanket module-level `pytestmark`) since
@@ -194,6 +195,68 @@ async def test_sentiment_empty_text_returns_400(sentiment_client, api_key):
     )
     assert resp.status_code == 400
     assert "cannot be empty" in resp.json()["message"]
+
+
+_SECRET_MARKER = "SECRET_MARKER_never_reach_the_client db_password=hunter2"
+
+
+class _BoomTextBlob:
+    """Stands in for `textblob.TextBlob` and raises on construction, so
+    `analyze_sentiment_service`'s `try` block sees a genuine unexpected
+    failure (not one of its own intentional `ValueError`s for empty/short
+    text)."""
+
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError(f"{_SECRET_MARKER} at /app/services/ai_tools/sentiment.py")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_analyze_sentiment_service_reraises_original_exception_type():
+    """Service-level regression test for the Batch 2 fix: an unexpected
+    failure inside `analyze_sentiment_service`'s `try` block must propagate
+    as its own real exception type (here `RuntimeError`), not get wrapped
+    into a `ValueError` the way it used to (the same leak pattern Batch 1
+    fixed in `grammar.py`'s `correct_grammar`)."""
+    import app.services.ai_tools.sentiment as svc
+
+    original_textblob = svc.TextBlob
+    svc.TextBlob = _BoomTextBlob
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            await svc.analyze_sentiment_service(
+                "This is long enough text to pass length validation."
+            )
+        assert _SECRET_MARKER in str(excinfo.value)
+        assert not isinstance(excinfo.value, ValueError)
+    finally:
+        svc.TextBlob = original_textblob
+
+
+@asyncio_session
+async def test_sentiment_unexpected_internal_failure_returns_500_without_leaking_exception_text(
+    sentiment_client, api_key, monkeypatch
+):
+    """Router-level regression test for the Batch 2 fix: the same forced
+    failure, now driven all the way through `POST /v1/ai_tools/sentiment`,
+    must land in the router's generic `except Exception` branch and return
+    the safe, generic `api_error` envelope - no raw exception text, class
+    name, or file path anywhere in the response body."""
+    monkeypatch.setattr(sentiment_service, "TextBlob", _BoomTextBlob)
+    resp = await sentiment_client.post(
+        "/v1/ai_tools/sentiment",
+        json={"text": "This is long enough text to pass length validation."},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 500, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Failed to analyze sentiment"
+    assert body["error"]["code"] == "SENTIMENT_ANALYSIS_FAILED"
+    assert "SECRET_MARKER" not in resp.text
+    assert "hunter2" not in resp.text
+    assert "db_password" not in resp.text
+    assert "RuntimeError" not in resp.text
+    assert "sentiment.py" not in resp.text
 
 
 @asyncio_session
