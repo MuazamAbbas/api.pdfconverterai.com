@@ -190,7 +190,16 @@ class DownloadersYoutubeProcessor(Processor):
                 message = str(e).lower()
                 expected = any(marker in message for marker in _PERMANENT_ERROR_MARKERS)
             if expected:
-                raise PermanentProcessingError(f"Could not download this video: {e}") from e
+                # Deliberately generic, client-safe message - `e` (a raw
+                # `yt_dlp.utils.DownloadError`) is never embedded here since
+                # it flows verbatim into the stored `job.error` field and is
+                # returned as-is by `GET /v1/jobs/{id}` (see
+                # `app/routers/jobs.py`). The real error is still captured
+                # server-side: `from e` chains it as `__cause__`, and
+                # `app/worker.py`'s `except PermanentProcessingError` branch
+                # logs via `logger.exception(...)`, which prints the full
+                # chained traceback including this message.
+                raise PermanentProcessingError("Could not download this video") from e
             raise TransientProcessingError("Temporary error downloading the video") from e
         except Exception as e:
             # Anything else (e.g. a filesystem hiccup writing the output) is
