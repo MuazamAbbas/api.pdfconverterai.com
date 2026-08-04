@@ -17,6 +17,7 @@ never exercised - `yt_dlp.YoutubeDL` itself is monkeypatched (the same
 import site `DownloadersYoutubeProcessor.execute()` uses), never a real
 `yt_dlp` download.
 """
+import logging
 import os
 
 import pytest
@@ -157,6 +158,40 @@ async def test_permanent_failure_video_unavailable_fails_immediately_no_retry(ap
     assert updated.status == JobStatus.FAILED
     assert updated.retryCount == 0
     assert updated.error and "Traceback" not in updated.error
+
+
+async def test_permanent_failure_does_not_leak_raw_exception_text_into_job_error(
+    api_key, monkeypatch, caplog
+):
+    """Batch 4 of issue #31: `job.error` (returned verbatim by
+    `GET /v1/jobs/{id}`) must not contain the raw `yt_dlp.DownloadError`
+    text, even though it's a real, live-reachable exception object - only
+    server-side logs may see it. Plants a marker string inside a permanent
+    ("video unavailable") failure and asserts it survives into the log
+    record `app.worker`'s `logger.exception(...)` produces, but never
+    reaches the stored/served `job.error` field."""
+    planted_marker = "leaked-internal-marker-9f3a1c7e"
+    file_doc = await _make_url_file_doc(api_key["id"], _A_YOUTUBE_URL, "yt-leak-check.txt")
+    job = await create_job(file_doc.id, "downloaders_youtube")
+
+    monkeypatch.setattr(
+        "yt_dlp.YoutubeDL", _RaisingYoutubeDL(f"Video unavailable: {planted_marker}")
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.worker"):
+        await worker.downloaders_youtube({"job_try": 1}, str(job.id))
+
+    updated = await get_job(str(job.id))
+    assert updated.status == JobStatus.FAILED
+    assert updated.error == "Could not download this video"
+    assert planted_marker not in updated.error
+
+    # The real error must still be visible server-side - `logger.exception`
+    # (not `.warning`) walks the `raise ... from e` chain and formats the
+    # original `yt_dlp.DownloadError` (with the planted marker) into the
+    # traceback, even though the outer PermanentProcessingError's own
+    # message is now generic.
+    assert planted_marker in caplog.text
 
 
 async def test_permanent_failure_bad_url_input_fails_immediately_no_retry(api_key):

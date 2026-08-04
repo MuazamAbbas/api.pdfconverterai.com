@@ -90,7 +90,11 @@ async def _run_job(ctx, job_id: str, make_processor, build_result) -> None:
         await mark_completed(job_id, result)
         logger.info("Job %s (%s) completed", job_id, job.type)
     except PermanentProcessingError as e:
-        logger.warning("Job %s (%s) failed permanently: %s", job_id, job.type, str(e))
+        # `logger.exception` (not `.warning`) so the real underlying error -
+        # e.g. the raw `yt_dlp` exception chained via `raise ... from e` in
+        # `downloaders/processors.py` - still lands server-side even though
+        # `str(e)` here is now a deliberately generic, client-safe message.
+        logger.exception("Job %s (%s) failed permanently: %s", job_id, job.type, str(e))
         await mark_failed(job_id, str(e))
     except TransientProcessingError as e:
         job_try = ctx.get("job_try", 1)
