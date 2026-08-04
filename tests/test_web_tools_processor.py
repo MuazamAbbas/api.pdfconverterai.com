@@ -98,17 +98,28 @@ async def test_fetch_network_error_is_transient(tmp_path, monkeypatch):
 
 
 async def test_fetch_no_text_extracted_is_permanent(tmp_path, monkeypatch):
+    """`execute()` deliberately raises a fixed, hardcoded client-facing
+    message here rather than passing the underlying `ValueError`'s text
+    through verbatim (issue #39 - Batch 5 of the #27/#29/#31 error-leak
+    class), so this asserts the exact literal - not just a passthrough of
+    whatever `fetch_webpage_text` happened to raise - and that the `from e`
+    chain (`__cause__`) is preserved for server-side traceback visibility."""
     file_doc = _fake_url_file_doc(tmp_path, "url.txt")
 
+    original = ValueError("No text extracted from webpage")
+
     async def _fake_fetch(url):
-        raise ValueError("No text extracted from webpage")
+        raise original
 
     monkeypatch.setattr("app.services.web_tools.summarize.fetch_webpage_text", _fake_fetch)
 
-    with pytest.raises(PermanentProcessingError, match="No text extracted"):
+    with pytest.raises(PermanentProcessingError) as exc_info:
         await WebToolsSummarizeProcessor().run(
             job=object(), file_doc=file_doc, ctx={"summarize_pipeline": object()}
         )
+
+    assert str(exc_info.value) == "No text extracted from the webpage, or it is too short"
+    assert exc_info.value.__cause__ is original
 
 
 async def test_execute_success_passes_fetched_text_and_ctx_pipeline_through(tmp_path, monkeypatch):

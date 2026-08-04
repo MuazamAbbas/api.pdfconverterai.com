@@ -60,16 +60,28 @@ async def test_no_text_detected_raises_permanent_error_no_retry(tmp_path, monkey
     behavior for a blank/textless image: it raises `ValueError("No text
     detected in image")`, which `ImageOcrProcessor.execute` must convert to
     a `PermanentProcessingError` (never a `TransientProcessingError`) -
-    ADR-003's retry classification."""
+    ADR-003's retry classification.
+
+    `execute()` deliberately raises a fixed, hardcoded client-facing message
+    here rather than passing the underlying `ValueError`'s text through
+    verbatim (issue #39 - Batch 5 of the #27/#29/#31 error-leak class), so
+    this asserts the exact literal - not just a passthrough of whatever
+    `extract_text_from_image` happened to raise - and that the `from e`
+    chain (`__cause__`) is preserved for server-side traceback visibility."""
     file_doc = _fake_file_doc(tmp_path, "blank.png")
 
+    original = ValueError("No text detected in image")
+
     async def _fake_extract(image_data: bytes) -> str:
-        raise ValueError("No text detected in image")
+        raise original
 
     monkeypatch.setattr("app.services.image.processors.extract_text_from_image", _fake_extract)
 
-    with pytest.raises(PermanentProcessingError):
+    with pytest.raises(PermanentProcessingError) as exc_info:
         await ImageOcrProcessor().run(job=object(), file_doc=file_doc)
+
+    assert str(exc_info.value) == "No text could be extracted from this image"
+    assert exc_info.value.__cause__ is original
 
 
 async def test_verify_rejects_empty_text_result_directly():

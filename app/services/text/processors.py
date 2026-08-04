@@ -66,7 +66,10 @@ class TextParaphraseProcessor(Processor):
         try:
             paraphrased = await paraphrase_text(prepared["text"], pipeline)
         except ValueError as e:
-            raise PermanentProcessingError(str(e)) from e
+            # Fixed, hardcoded message rather than `str(e)` - decouples this
+            # client-facing contract from `paraphrase_text`'s text
+            # (issue #39 - Batch 5 of the #27/#29/#31 error leak class).
+            raise PermanentProcessingError("Text must be a non-empty string") from e
         except Exception as e:
             raise TransientProcessingError("Temporary error paraphrasing the text") from e
         return {"paraphrased": paraphrased}
@@ -98,7 +101,10 @@ class TextSummarizeProcessor(Processor):
         try:
             summary = await summarize_text_service(prepared["text"], pipeline)
         except ValueError as e:
-            raise PermanentProcessingError(str(e)) from e
+            # Fixed, hardcoded message rather than `str(e)` - decouples this
+            # client-facing contract from `summarize_text_service`'s text
+            # (issue #39 - Batch 5 of the #27/#29/#31 error leak class).
+            raise PermanentProcessingError("Text must be at least 50 characters") from e
         except Exception as e:
             raise TransientProcessingError("Temporary error summarizing the text") from e
         return {"summary": summary}

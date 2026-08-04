@@ -47,7 +47,10 @@ class ImageOcrProcessor(Processor):
                 image_data = f.read()
             text = await extract_text_from_image(image_data)
         except ValueError as e:
-            raise PermanentProcessingError(str(e)) from e
+            # Fixed, hardcoded message rather than `str(e)` - decouples this
+            # client-facing contract from `extract_text_from_image`'s text
+            # (issue #39 - Batch 5 of the #27/#29/#31 error leak class).
+            raise PermanentProcessingError("No text could be extracted from this image") from e
         except Exception as e:
             raise TransientProcessingError("Temporary error extracting text from the image") from e
         return {"text": text}

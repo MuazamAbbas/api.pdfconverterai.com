@@ -117,17 +117,29 @@ async def test_paraphrase_execute_success_passes_ctx_pipeline_through(tmp_path, 
 
 
 async def test_paraphrase_permanent_error_is_not_retried(tmp_path, monkeypatch):
+    """`execute()` deliberately raises a fixed, hardcoded client-facing
+    message here rather than passing the underlying `ValueError`'s text
+    through verbatim (issue #39 - Batch 5 of the #27/#29/#31 error-leak
+    class) - it happens to be textually identical to `paraphrase_text`'s
+    own documented message today, but this asserts the exact literal (and
+    the `from e` chain / `__cause__`) rather than relying on that
+    coincidence, since the whole point of the fix is decoupling the two."""
     file_doc = _fake_text_file_doc(tmp_path, "hello.txt", text="Hello there, this is some text.")
 
+    original = ValueError("Text must be a non-empty string")
+
     async def _fake_paraphrase(text, pipeline):
-        raise ValueError("Text must be a non-empty string")
+        raise original
 
     monkeypatch.setattr("app.services.text.paraphrase.paraphrase_text", _fake_paraphrase)
 
-    with pytest.raises(PermanentProcessingError, match="non-empty string"):
+    with pytest.raises(PermanentProcessingError) as exc_info:
         await TextParaphraseProcessor().run(
             job=object(), file_doc=file_doc, ctx={"paraphrase_pipeline": object()}
         )
+
+    assert str(exc_info.value) == "Text must be a non-empty string"
+    assert exc_info.value.__cause__ is original
 
 
 async def test_paraphrase_unexpected_error_is_wrapped_as_transient(tmp_path, monkeypatch):
@@ -228,17 +240,30 @@ async def test_summarize_execute_success_passes_ctx_pipeline_through(tmp_path, m
 
 
 async def test_summarize_permanent_error_is_not_retried(tmp_path, monkeypatch):
+    """`execute()` deliberately raises a fixed, hardcoded client-facing
+    message here rather than passing the underlying `ValueError`'s text
+    through verbatim (issue #39 - Batch 5 of the #27/#29/#31 error-leak
+    class) - it happens to be textually identical to
+    `summarize_text_service`'s own documented message today, but this
+    asserts the exact literal (and the `from e` chain / `__cause__`) rather
+    than relying on that coincidence, since the whole point of the fix is
+    decoupling the two."""
     file_doc = _fake_text_file_doc(tmp_path, "long.txt", text=_LONG_ENOUGH_TEXT)
 
+    original = ValueError("Text must be at least 50 characters")
+
     async def _fake_summarize(text, pipeline):
-        raise ValueError("Text must be at least 50 characters")
+        raise original
 
     monkeypatch.setattr("app.services.text.summarize.summarize_text_service", _fake_summarize)
 
-    with pytest.raises(PermanentProcessingError, match="at least 50 characters"):
+    with pytest.raises(PermanentProcessingError) as exc_info:
         await TextSummarizeProcessor().run(
             job=object(), file_doc=file_doc, ctx={"summarize_pipeline": object()}
         )
+
+    assert str(exc_info.value) == "Text must be at least 50 characters"
+    assert exc_info.value.__cause__ is original
 
 
 async def test_summarize_unexpected_error_is_wrapped_as_transient(tmp_path, monkeypatch):

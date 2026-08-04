@@ -99,18 +99,30 @@ async def test_execute_success_passes_ctx_pipeline_through_and_returns_summary(t
 async def test_permanent_error_from_summarize_service_is_not_retried(tmp_path, monkeypatch):
     """`summarize_pdf_service` raises `ValueError` for corrupted/too-short
     text (per its own docstring) - `execute()` must convert this to
-    `PermanentProcessingError`, never `TransientProcessingError`."""
+    `PermanentProcessingError`, never `TransientProcessingError`.
+
+    `execute()` deliberately raises a fixed, hardcoded client-facing message
+    here rather than passing the underlying `ValueError`'s text through
+    verbatim (issue #39 - Batch 5 of the #27/#29/#31 error-leak class), so
+    this asserts the exact literal - not just a passthrough of whatever
+    `summarize_pdf_service` happened to raise - and that the `from e` chain
+    (`__cause__`) is preserved for server-side traceback visibility."""
     file_doc = _fake_pdf_file_doc(tmp_path, "report.pdf")
 
+    original = ValueError("Text must be at least 50 characters")
+
     async def _fake_summarize(path, summarizer):
-        raise ValueError("Text must be at least 50 characters")
+        raise original
 
     monkeypatch.setattr("app.services.pdf.summarize.summarize_pdf_service", _fake_summarize)
 
-    with pytest.raises(PermanentProcessingError, match="at least 50 characters"):
+    with pytest.raises(PermanentProcessingError) as exc_info:
         await PdfSummarizeProcessor().run(
             job=object(), file_doc=file_doc, ctx={"summarizer_pipeline": object()}
         )
+
+    assert str(exc_info.value) == "Invalid or unreadable PDF file, or text too short to summarize"
+    assert exc_info.value.__cause__ is original
 
 
 async def test_unexpected_error_from_summarize_service_is_wrapped_as_transient(tmp_path, monkeypatch):
