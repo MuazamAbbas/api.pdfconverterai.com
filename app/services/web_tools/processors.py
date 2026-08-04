@@ -63,7 +63,16 @@ class WebToolsSummarizeProcessor(Processor):
             raise TransientProcessingError("Temporary error fetching the webpage") from e
         except ValueError as e:
             # No text extracted / text too short - a permanent input problem.
-            raise PermanentProcessingError(str(e)) from e
+            # Deliberately a fixed, hardcoded message rather than `str(e)`:
+            # `fetch_webpage_text` only ever raises this ValueError with an
+            # already-safe literal string today, but hardcoding here
+            # decouples this client-facing contract from that service
+            # function's text (issue #39 - Batch 5 of the #27/#29/#31 error
+            # leak class; see `downloaders/processors.py` for the
+            # originally-motivating case, a genuinely raw library exception).
+            raise PermanentProcessingError(
+                "No text extracted from the webpage, or it is too short"
+            ) from e
 
         pipeline = (ctx or {}).get("summarize_pipeline")
         if pipeline is None:

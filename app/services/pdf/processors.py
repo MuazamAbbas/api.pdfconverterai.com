@@ -53,7 +53,12 @@ class PdfConvertProcessor(Processor):
         try:
             text = await extract_text_from_pdf(prepared["path"])
         except ValueError as e:
-            raise PermanentProcessingError(str(e)) from e
+            # Fixed, hardcoded message rather than `str(e)` - decouples this
+            # client-facing contract from `extract_text_from_pdf`'s text
+            # (issue #39 - Batch 5 of the #27/#29/#31 error leak class).
+            raise PermanentProcessingError(
+                "Invalid or unreadable PDF file, or no text could be extracted"
+            ) from e
         except OSError as e:
             raise TransientProcessingError("Temporary I/O error while reading the file") from e
         return {"text": text}
@@ -79,7 +84,10 @@ class PdfToWordProcessor(Processor):
         try:
             output_path = await convert_pdf_to_word(prepared["path"], prepared["output_dir"])
         except ValueError as e:
-            raise PermanentProcessingError(str(e)) from e
+            # Fixed, hardcoded message rather than `str(e)` - decouples this
+            # client-facing contract from `convert_pdf_to_word`'s text
+            # (issue #39 - Batch 5 of the #27/#29/#31 error leak class).
+            raise PermanentProcessingError("Source PDF file is missing or has expired") from e
         except Exception as e:
             raise TransientProcessingError("Temporary error converting the file") from e
         return {"output_path": output_path}
@@ -110,7 +118,12 @@ class PdfSummarizeProcessor(Processor):
         try:
             summary = await summarize_pdf_service(prepared["path"], summarizer)
         except ValueError as e:
-            raise PermanentProcessingError(str(e)) from e
+            # Fixed, hardcoded message rather than `str(e)` - decouples this
+            # client-facing contract from `summarize_pdf_service`'s text
+            # (issue #39 - Batch 5 of the #27/#29/#31 error leak class).
+            raise PermanentProcessingError(
+                "Invalid or unreadable PDF file, or text too short to summarize"
+            ) from e
         except Exception as e:
             raise TransientProcessingError("Temporary error summarizing the file") from e
         return {"summary": summary}
