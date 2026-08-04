@@ -73,7 +73,7 @@ async def _create_image_job(request: Request, file_id: str, job_type: str, api_k
     if ext not in IMAGE_ALLOWED_EXTENSIONS:
         raise api_error(400, "File must be a supported image (.jpg, .jpeg, .png)", "FILE_INVALID_TYPE")
 
-    job = await create_job(file_doc.id, job_type)
+    job = await create_job(file_doc.id, job_type, ObjectId(api_key["key_data"]["_id"]))
     try:
         await request.app.state.arq_redis.enqueue_job(job_type, str(job.id), _job_id=str(job.id))
         await mark_queued(str(job.id))

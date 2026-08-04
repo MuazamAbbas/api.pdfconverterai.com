@@ -64,7 +64,7 @@ async def _make_file_doc(owner_id, content: bytes, filename: str):
 
 async def test_permanent_failure_corrupt_pdf_fails_immediately_no_retry(api_key, corrupt_pdf_bytes):
     file_doc = await _make_file_doc(api_key["id"], corrupt_pdf_bytes, "corrupt-retry-test.pdf")
-    job = await create_job(file_doc.id, "pdf_convert")
+    job = await create_job(file_doc.id, "pdf_convert", api_key["id"])
 
     # job_try=1: even on a fresh, first attempt, a permanent error must not retry.
     await worker.pdf_convert({"job_try": 1}, str(job.id))
@@ -77,7 +77,7 @@ async def test_permanent_failure_corrupt_pdf_fails_immediately_no_retry(api_key,
 
 async def test_transient_failure_retries_below_max_tries(api_key, test_pdf_bytes, monkeypatch):
     file_doc = await _make_file_doc(api_key["id"], test_pdf_bytes, "transient-retry-test.pdf")
-    job = await create_job(file_doc.id, "pdf_convert")
+    job = await create_job(file_doc.id, "pdf_convert", api_key["id"])
 
     async def _boom(path):
         raise OSError("simulated transient disk hiccup")
@@ -97,7 +97,7 @@ async def test_transient_failure_exhausted_retries_marks_failed_no_more_retry(
     api_key, test_pdf_bytes, monkeypatch
 ):
     file_doc = await _make_file_doc(api_key["id"], test_pdf_bytes, "transient-exhausted-test.pdf")
-    job = await create_job(file_doc.id, "pdf_convert")
+    job = await create_job(file_doc.id, "pdf_convert", api_key["id"])
 
     async def _boom(path):
         raise OSError("simulated transient disk hiccup")
@@ -118,7 +118,7 @@ async def test_successful_conversion_after_transient_retry_completes(api_key, te
     condition clears, the next attempt (a fresh `_run_job` call, as the real
     `arq` worker would do after `Retry`) completes normally."""
     file_doc = await _make_file_doc(api_key["id"], test_pdf_bytes, "transient-recovers-test.pdf")
-    job = await create_job(file_doc.id, "pdf_convert")
+    job = await create_job(file_doc.id, "pdf_convert", api_key["id"])
 
     calls = {"n": 0}
     from app.services.pdf.convert import extract_text_from_pdf as real_extract

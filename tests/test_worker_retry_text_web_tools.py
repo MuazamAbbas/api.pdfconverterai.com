@@ -73,7 +73,7 @@ assert len(_LONG_ENOUGH_TEXT) >= 50
 
 async def test_paraphrase_no_pipeline_in_ctx_retries_instead_of_failing(api_key):
     file_doc = await _make_text_file_doc(api_key["id"], "Some text to paraphrase.", "paraphrase-no-pipeline.txt")
-    job = await create_job(file_doc.id, "text_paraphrase")
+    job = await create_job(file_doc.id, "text_paraphrase", api_key["id"])
 
     with pytest.raises(Retry):
         await worker.text_paraphrase({"job_try": 1}, str(job.id))
@@ -88,7 +88,7 @@ async def test_paraphrase_permanent_failure_empty_text_fails_immediately_no_retr
     `execute()` ever runs - a permanent, non-retryable failure regardless of
     whether the pipeline is loaded."""
     file_doc = await _make_text_file_doc(api_key["id"], "   ", "paraphrase-empty.txt")
-    job = await create_job(file_doc.id, "text_paraphrase")
+    job = await create_job(file_doc.id, "text_paraphrase", api_key["id"])
 
     await worker.text_paraphrase({"job_try": 1}, str(job.id))
 
@@ -100,7 +100,7 @@ async def test_paraphrase_permanent_failure_empty_text_fails_immediately_no_retr
 
 async def test_paraphrase_transient_failure_exhausted_retries_marks_failed_no_more_retry(api_key):
     file_doc = await _make_text_file_doc(api_key["id"], "Some text to paraphrase.", "paraphrase-exhausted.txt")
-    job = await create_job(file_doc.id, "text_paraphrase")
+    job = await create_job(file_doc.id, "text_paraphrase", api_key["id"])
 
     await worker.text_paraphrase({"job_try": worker.MAX_TRIES}, str(job.id))
 
@@ -112,7 +112,7 @@ async def test_paraphrase_transient_failure_exhausted_retries_marks_failed_no_mo
 
 async def test_paraphrase_successful_with_preloaded_pipeline_completes(api_key):
     file_doc = await _make_text_file_doc(api_key["id"], "Some text to paraphrase.", "paraphrase-success.txt")
-    job = await create_job(file_doc.id, "text_paraphrase")
+    job = await create_job(file_doc.id, "text_paraphrase", api_key["id"])
 
     def _fake_pipeline(input_text, **kwargs):
         return [{"generated_text": "A fake but plausible paraphrase."}]
@@ -129,7 +129,7 @@ async def test_paraphrase_successful_with_preloaded_pipeline_completes(api_key):
 
 async def test_summarize_no_pipeline_in_ctx_retries_instead_of_failing(api_key):
     file_doc = await _make_text_file_doc(api_key["id"], _LONG_ENOUGH_TEXT, "summarize-no-pipeline.txt")
-    job = await create_job(file_doc.id, "text_summarize")
+    job = await create_job(file_doc.id, "text_summarize", api_key["id"])
 
     with pytest.raises(Retry):
         await worker.text_summarize({"job_try": 1}, str(job.id))
@@ -141,7 +141,7 @@ async def test_summarize_no_pipeline_in_ctx_retries_instead_of_failing(api_key):
 
 async def test_summarize_permanent_failure_too_short_text_fails_immediately_no_retry(api_key):
     file_doc = await _make_text_file_doc(api_key["id"], "too short", "summarize-short.txt")
-    job = await create_job(file_doc.id, "text_summarize")
+    job = await create_job(file_doc.id, "text_summarize", api_key["id"])
 
     await worker.text_summarize({"job_try": 1}, str(job.id))
 
@@ -153,7 +153,7 @@ async def test_summarize_permanent_failure_too_short_text_fails_immediately_no_r
 
 async def test_summarize_transient_failure_exhausted_retries_marks_failed_no_more_retry(api_key):
     file_doc = await _make_text_file_doc(api_key["id"], _LONG_ENOUGH_TEXT, "summarize-exhausted.txt")
-    job = await create_job(file_doc.id, "text_summarize")
+    job = await create_job(file_doc.id, "text_summarize", api_key["id"])
 
     await worker.text_summarize({"job_try": worker.MAX_TRIES}, str(job.id))
 
@@ -165,7 +165,7 @@ async def test_summarize_transient_failure_exhausted_retries_marks_failed_no_mor
 
 async def test_summarize_successful_with_preloaded_pipeline_completes(api_key):
     file_doc = await _make_text_file_doc(api_key["id"], _LONG_ENOUGH_TEXT, "summarize-success.txt")
-    job = await create_job(file_doc.id, "text_summarize")
+    job = await create_job(file_doc.id, "text_summarize", api_key["id"])
 
     def _fake_pipeline(text, max_length=50, min_length=10, do_sample=False, num_beams=4, length_penalty=1.0):
         return [{"summary_text": "A fake but plausible summary."}]
@@ -184,7 +184,7 @@ async def test_web_tools_permanent_failure_bad_url_fails_immediately_no_retry(ap
     """`WebToolsSummarizeProcessor.validate()` rejects a non-http(s) URL
     before `execute()` (and therefore any network fetch) ever runs."""
     file_doc = await _make_text_file_doc(api_key["id"], "ftp://example.com", "web-tools-bad-url.txt")
-    job = await create_job(file_doc.id, "web_tools_summarize")
+    job = await create_job(file_doc.id, "web_tools_summarize", api_key["id"])
 
     await worker.web_tools_summarize({"job_try": 1}, str(job.id))
 
@@ -196,7 +196,7 @@ async def test_web_tools_permanent_failure_bad_url_fails_immediately_no_retry(ap
 
 async def test_web_tools_no_pipeline_in_ctx_retries_instead_of_failing(api_key, monkeypatch):
     file_doc = await _make_text_file_doc(api_key["id"], "https://example.com/article", "web-tools-no-pipeline.txt")
-    job = await create_job(file_doc.id, "web_tools_summarize")
+    job = await create_job(file_doc.id, "web_tools_summarize", api_key["id"])
 
     async def _fake_fetch(url):
         return "Fetched webpage text, long enough to be summarized." * 2
@@ -213,7 +213,7 @@ async def test_web_tools_no_pipeline_in_ctx_retries_instead_of_failing(api_key, 
 
 async def test_web_tools_network_error_fetching_page_retries(api_key, monkeypatch):
     file_doc = await _make_text_file_doc(api_key["id"], "https://example.com/article", "web-tools-network-error.txt")
-    job = await create_job(file_doc.id, "web_tools_summarize")
+    job = await create_job(file_doc.id, "web_tools_summarize", api_key["id"])
 
     import aiohttp
 
@@ -232,7 +232,7 @@ async def test_web_tools_network_error_fetching_page_retries(api_key, monkeypatc
 
 async def test_web_tools_transient_failure_exhausted_retries_marks_failed_no_more_retry(api_key, monkeypatch):
     file_doc = await _make_text_file_doc(api_key["id"], "https://example.com/article", "web-tools-exhausted.txt")
-    job = await create_job(file_doc.id, "web_tools_summarize")
+    job = await create_job(file_doc.id, "web_tools_summarize", api_key["id"])
 
     async def _fake_fetch(url):
         return "Fetched webpage text, long enough to be summarized." * 2
@@ -249,7 +249,7 @@ async def test_web_tools_transient_failure_exhausted_retries_marks_failed_no_mor
 
 async def test_web_tools_successful_with_preloaded_pipeline_completes(api_key, monkeypatch):
     file_doc = await _make_text_file_doc(api_key["id"], "https://example.com/article", "web-tools-success.txt")
-    job = await create_job(file_doc.id, "web_tools_summarize")
+    job = await create_job(file_doc.id, "web_tools_summarize", api_key["id"])
 
     async def _fake_fetch(url):
         return "Fetched webpage paragraph text, long enough to summarize."

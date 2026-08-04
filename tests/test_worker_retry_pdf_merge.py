@@ -56,7 +56,7 @@ async def _make_pdf_file_doc(owner_id, content: bytes, filename: str):
 async def test_happy_path_completes_with_resolvable_output_file(api_key, test_pdf_bytes):
     file_a = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-happy-a.pdf")
     file_b = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-happy-b.pdf")
-    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge")
+    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge", api_key["id"])
 
     await worker.pdf_merge({"job_try": 1}, str(job.id))
 
@@ -79,7 +79,7 @@ async def test_happy_path_completes_with_resolvable_output_file(api_key, test_pd
 async def test_missing_input_file_fails_immediately_no_retry(api_key, test_pdf_bytes):
     file_a = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-missing-a.pdf")
     job = await create_multi_file_job(
-        [file_a.id, "0123456789ab0123456789ab"], "pdf_merge"
+        [file_a.id, "0123456789ab0123456789ab"], "pdf_merge", api_key["id"]
     )
 
     await worker.pdf_merge({"job_try": 1}, str(job.id))
@@ -95,7 +95,7 @@ async def test_permanent_failure_corrupt_pdf_among_valid_fails_immediately_no_re
 ):
     file_a = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-corrupt-valid.pdf")
     file_b = await _make_pdf_file_doc(api_key["id"], corrupt_pdf_bytes, "merge-corrupt-bad.pdf")
-    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge")
+    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge", api_key["id"])
 
     # job_try=1: even on a fresh, first attempt, a permanent error must not retry.
     await worker.pdf_merge({"job_try": 1}, str(job.id))
@@ -110,7 +110,7 @@ async def test_permanent_failure_corrupt_pdf_among_valid_fails_immediately_no_re
 async def test_transient_failure_retries_below_max_tries(api_key, test_pdf_bytes, monkeypatch):
     file_a = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-transient-a.pdf")
     file_b = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-transient-b.pdf")
-    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge")
+    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge", api_key["id"])
 
     def _boom(self, path, **kwargs):
         raise OSError("simulated transient disk hiccup")
@@ -131,7 +131,7 @@ async def test_transient_failure_exhausted_retries_marks_failed_no_more_retry(
 ):
     file_a = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-exhausted-a.pdf")
     file_b = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-exhausted-b.pdf")
-    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge")
+    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge", api_key["id"])
 
     def _boom(self, path, **kwargs):
         raise OSError("simulated transient disk hiccup")
@@ -157,7 +157,7 @@ async def test_successful_merge_after_transient_retry_completes(
     the real `arq` worker would do after `Retry`) completes normally."""
     file_a = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-recovers-a.pdf")
     file_b = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "merge-recovers-b.pdf")
-    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge")
+    job = await create_multi_file_job([file_a.id, file_b.id], "pdf_merge", api_key["id"])
 
     calls = {"n": 0}
     real_append = PyPDF2.PdfMerger.append

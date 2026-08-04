@@ -26,15 +26,23 @@ async def get_job_status(job_id: str, api_key: dict = Depends(verify_api_key)):
         logger.warning("Job not found: %s", job_id)
         raise api_error(404, "Job not found", "JOB_NOT_FOUND")
 
-    # Best-effort ownership check via the job's input file. If the input
-    # file has already expired/been cleaned up we can't re-verify ownership
-    # from it - allow the poll through rather than permanently locking a
-    # caller out of their own completed job's result.
+    # Ownership check against the job's own stamped owner (ADR-016 fix - the
+    # old file-derived check fail-open'd once the linked File TTL-expired,
+    # letting any valid `jobs`-scoped key read another tenant's job). Jobs
+    # created after this deploy always have `ownerApiKeyId` set, so this is
+    # now an authoritative check, not a best-effort one.
     owner_id = str(api_key["key_data"]["_id"])
-    file_doc = await get_file_by_id(str(job.fileId))
-    if file_doc is not None and str(file_doc.ownerApiKeyId) != owner_id:
-        logger.warning("Job %s not owned by requesting key", job_id)
-        raise api_error(403, "Not authorized to view this job", "JOB_FORBIDDEN")
+    if job.ownerApiKeyId is not None:
+        if str(job.ownerApiKeyId) != owner_id:
+            logger.warning("Job %s not owned by requesting key", job_id)
+            raise api_error(403, "Not authorized to view this job", "JOB_FORBIDDEN")
+    else:
+        # Transitional fallback for job docs created before this fix landed;
+        # self-resolves once they TTL-expire (jobs.expiresAt, ~1hr window).
+        file_doc = await get_file_by_id(str(job.fileId))
+        if file_doc is not None and str(file_doc.ownerApiKeyId) != owner_id:
+            logger.warning("Job %s not owned by requesting key", job_id)
+            raise api_error(403, "Not authorized to view this job", "JOB_FORBIDDEN")
 
     data = {"job_id": str(job.id), "type": job.type, "status": job.status.value}
     if job.result is not None:

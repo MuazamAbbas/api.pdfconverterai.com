@@ -115,7 +115,7 @@ class _EmptyOutputYoutubeDL:
 
 async def test_transient_network_error_retries_instead_of_failing(api_key, monkeypatch):
     file_doc = await _make_url_file_doc(api_key["id"], _A_YOUTUBE_URL, "yt-transient.txt")
-    job = await create_job(file_doc.id, "downloaders_youtube")
+    job = await create_job(file_doc.id, "downloaders_youtube", api_key["id"])
 
     monkeypatch.setattr(
         "yt_dlp.YoutubeDL", _RaisingYoutubeDL("some generic network error")
@@ -131,7 +131,7 @@ async def test_transient_network_error_retries_instead_of_failing(api_key, monke
 
 async def test_transient_failure_exhausted_retries_marks_failed_no_more_retry(api_key, monkeypatch):
     file_doc = await _make_url_file_doc(api_key["id"], _A_YOUTUBE_URL, "yt-exhausted.txt")
-    job = await create_job(file_doc.id, "downloaders_youtube")
+    job = await create_job(file_doc.id, "downloaders_youtube", api_key["id"])
 
     monkeypatch.setattr(
         "yt_dlp.YoutubeDL", _RaisingYoutubeDL("some generic network error")
@@ -147,7 +147,7 @@ async def test_transient_failure_exhausted_retries_marks_failed_no_more_retry(ap
 
 async def test_permanent_failure_video_unavailable_fails_immediately_no_retry(api_key, monkeypatch):
     file_doc = await _make_url_file_doc(api_key["id"], _A_YOUTUBE_URL, "yt-unavailable.txt")
-    job = await create_job(file_doc.id, "downloaders_youtube")
+    job = await create_job(file_doc.id, "downloaders_youtube", api_key["id"])
 
     monkeypatch.setattr("yt_dlp.YoutubeDL", _RaisingYoutubeDL("Video unavailable"))
 
@@ -172,7 +172,7 @@ async def test_permanent_failure_does_not_leak_raw_exception_text_into_job_error
     reaches the stored/served `job.error` field."""
     planted_marker = "leaked-internal-marker-9f3a1c7e"
     file_doc = await _make_url_file_doc(api_key["id"], _A_YOUTUBE_URL, "yt-leak-check.txt")
-    job = await create_job(file_doc.id, "downloaders_youtube")
+    job = await create_job(file_doc.id, "downloaders_youtube", api_key["id"])
 
     monkeypatch.setattr(
         "yt_dlp.YoutubeDL", _RaisingYoutubeDL(f"Video unavailable: {planted_marker}")
@@ -198,7 +198,7 @@ async def test_permanent_failure_bad_url_input_fails_immediately_no_retry(api_ke
     """`DownloadersYoutubeProcessor.validate()` rejects a non-http(s) URL
     before `execute()` (and therefore any yt_dlp call) ever runs."""
     file_doc = await _make_url_file_doc(api_key["id"], "ftp://example.com/video", "yt-bad-url.txt")
-    job = await create_job(file_doc.id, "downloaders_youtube")
+    job = await create_job(file_doc.id, "downloaders_youtube", api_key["id"])
 
     await worker.downloaders_youtube({"job_try": 1}, str(job.id))
 
@@ -210,7 +210,7 @@ async def test_permanent_failure_bad_url_input_fails_immediately_no_retry(api_ke
 
 async def test_verify_rejects_zero_byte_missing_output_as_permanent_no_retry(api_key, monkeypatch):
     file_doc = await _make_url_file_doc(api_key["id"], _A_YOUTUBE_URL, "yt-empty-output.txt")
-    job = await create_job(file_doc.id, "downloaders_youtube")
+    job = await create_job(file_doc.id, "downloaders_youtube", api_key["id"])
 
     monkeypatch.setattr("yt_dlp.YoutubeDL", _EmptyOutputYoutubeDL)
 
@@ -225,7 +225,7 @@ async def test_verify_rejects_zero_byte_missing_output_as_permanent_no_retry(api
 
 async def test_successful_download_completes_with_registered_output_file(api_key, monkeypatch):
     file_doc = await _make_url_file_doc(api_key["id"], _A_YOUTUBE_URL, "yt-success.txt")
-    job = await create_job(file_doc.id, "downloaders_youtube")
+    job = await create_job(file_doc.id, "downloaders_youtube", api_key["id"])
 
     class _SucceedingYoutubeDL:
         def __init__(self, opts):

@@ -98,7 +98,7 @@ async def _get_owned_pdf_file(file_id: str, api_key: dict):
 async def _create_pdf_job(request: Request, file_id: str, job_type: str, api_key: dict) -> dict:
     file_doc = await _get_owned_pdf_file(file_id, api_key)
 
-    job = await create_job(file_doc.id, job_type)
+    job = await create_job(file_doc.id, job_type, ObjectId(api_key["key_data"]["_id"]))
     try:
         await request.app.state.arq_redis.enqueue_job(job_type, str(job.id), _job_id=str(job.id))
         await mark_queued(str(job.id))
@@ -162,7 +162,9 @@ async def merge_pdf(
             "FILE_COUNT_INVALID",
         )
 
-    job = await create_multi_file_job([file_doc.id for file_doc in file_docs], "pdf_merge")
+    job = await create_multi_file_job(
+        [file_doc.id for file_doc in file_docs], "pdf_merge", ObjectId(api_key["key_data"]["_id"])
+    )
     try:
         await request.app.state.arq_redis.enqueue_job("pdf_merge", str(job.id), _job_id=str(job.id))
         await mark_queued(str(job.id))

@@ -81,6 +81,28 @@ class JobBase(BaseModel):
     # unsupported formats should be marked Failed immediately by the
     # worker without incrementing/consuming retries.
     maxRetries: int = Field(default=3, ge=0)
+    # ADR-016: stamped directly at job-creation time (mirrors
+    # files.ownerApiKeyId, see FileBase) so GET /jobs/{id}'s ownership
+    # check no longer has to derive ownership transitively via the
+    # linked File record, which fails open if that File has already
+    # TTL-expired (files.py TTL-cleans upload records well before a job's
+    # own `expiresAt`). Optional — NOT required — because job documents
+    # created before this fix went live won't have it; the ownership-check
+    # fallback logic (app/routers/jobs.py) treats `None` here as "legacy
+    # doc, fall back to the file-based check" and a set-but-mismatched
+    # value as a hard 403. No backfill/migration was needed for those
+    # legacy docs: `jobs.expiresAt` uses the same short
+    # `settings.file_retention_minutes` (60 min) window as `files`, and
+    # `jobs_expiresAt_ttl` (app/core/database.py) already TTL-cleans them,
+    # so every unstamped job self-expires shortly after this deploy.
+    ownerApiKeyId: Optional[PyObjectId] = Field(
+        default=None,
+        description=(
+            "References api_keys._id — which API key created this job. "
+            "None only for legacy pre-ADR-016 documents; every job created "
+            "via app/services/jobs/service.py now always sets this."
+        ),
+    )
 
 
 class JobCreate(JobBase):
