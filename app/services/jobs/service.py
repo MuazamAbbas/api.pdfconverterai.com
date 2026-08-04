@@ -33,6 +33,25 @@ async def create_job(file_id: ObjectId, job_type: str) -> JobDocument:
     return JobDocument(**doc)
 
 
+async def create_multi_file_job(file_ids: list[ObjectId], job_type: str) -> JobDocument:
+    """Same as `create_job`, but for Tier 2 tools that take multiple input
+    files (e.g. `pdf_merge`, ADR-003 / Handbook Part I.2).
+
+    `fileId` is set to `file_ids[0]` (not left unset) so existing
+    single-file consumers of the `jobs` collection - notably
+    `GET /jobs/{id}`'s ownership check in `app/routers/jobs.py` - keep
+    working unchanged without needing to special-case multi-file job types.
+    `fileIds` carries the full list for job types that need it.
+    """
+    job_create = JobCreate(fileId=file_ids[0], fileIds=file_ids, type=job_type)
+    insert_result = await db.jobs.insert_one(job_create.model_dump(by_alias=True))
+    doc = await db.jobs.find_one({"_id": insert_result.inserted_id})
+    logger.info(
+        "Created job %s type=%s files=%s", insert_result.inserted_id, job_type, file_ids
+    )
+    return JobDocument(**doc)
+
+
 async def get_job(job_id: str) -> Optional[JobDocument]:
     oid = _to_object_id(job_id)
     if oid is None:
