@@ -113,6 +113,84 @@ async def _run_job(ctx, job_id: str, make_processor, build_result) -> None:
         await mark_failed(job_id, "An unexpected error occurred while processing the file")
 
 
+async def _run_multi_file_job(ctx, job_id: str, make_processor, build_result) -> None:
+    """Shared orchestration for multi-file job types (currently only
+    `pdf_merge` - Handbook Part I.2, the first multi-file Tier 2 tool).
+
+    Mirrors `_run_job`'s status-transition/retry/error-handling structure
+    exactly (same `mark_processing`/`PermanentProcessingError`/
+    `TransientProcessingError`/generic-`Exception` handling, same
+    `Retry(defer=...)` backoff up to `MAX_TRIES`), but resolves *multiple*
+    input files via `job.fileIds` instead of a single `job.fileId`, and
+    calls the processor's `validate`/`prepare`/`execute`/`verify` steps
+    directly in sequence (matching `Processor.run()`'s own try/finally
+    structure, including always running `cleanup()`) since multi-file
+    processors like `MergeProcessor` (`app/services/pdf/processors.py`)
+    don't subclass `Processor` and can't go through its single-`file_doc`
+    `.run()`.
+    """
+    job = await get_job(job_id)
+    if job is None:
+        logger.error("Job %s not found - dropping (likely expired)", job_id)
+        return
+
+    file_ids = job.fileIds
+    if not file_ids:
+        # Defensive fallback only - `pdf_merge` jobs always get `fileIds`
+        # set by `create_multi_file_job` (`app/services/jobs/service.py`),
+        # so this path shouldn't be hit in practice.
+        logger.warning(
+            "Job %s (%s) has no fileIds, falling back to single fileId %s",
+            job_id, job.type, job.fileId,
+        )
+        file_ids = [job.fileId]
+
+    file_docs = []
+    for file_id in file_ids:
+        file_doc = await get_file_by_id(str(file_id))
+        if file_doc is None:
+            logger.warning("Job %s references a missing/expired file %s", job_id, file_id)
+            await mark_failed(job_id, "Input file not found or has expired")
+            return
+        file_docs.append(file_doc)
+
+    await mark_processing(job_id)
+    processor = make_processor()
+    prepared: dict = {}
+    try:
+        try:
+            await processor.validate(job, file_docs)
+            prepared = await processor.prepare(job, file_docs)
+            raw_result = await processor.execute(job, file_docs, prepared, ctx)
+            await processor.verify(job, file_docs, raw_result)
+            result = await build_result(job, file_docs, raw_result)
+            await mark_completed(job_id, result)
+            logger.info("Job %s (%s) completed", job_id, job.type)
+        except PermanentProcessingError as e:
+            # `logger.exception` (not `.warning`) so the real underlying
+            # error still lands server-side even though `str(e)` here is a
+            # deliberately generic, client-safe message.
+            logger.exception("Job %s (%s) failed permanently: %s", job_id, job.type, str(e))
+            await mark_failed(job_id, str(e))
+        except TransientProcessingError as e:
+            job_try = ctx.get("job_try", 1)
+            if job_try >= MAX_TRIES:
+                logger.error("Job %s (%s) exhausted retries: %s", job_id, job.type, str(e))
+                await mark_failed(job_id, "Processing failed after multiple attempts")
+            else:
+                await increment_retry_count(job_id)
+                logger.info(
+                    "Job %s (%s) transient failure, retrying (attempt %s/%s): %s",
+                    job_id, job.type, job_try, MAX_TRIES, str(e),
+                )
+                raise Retry(defer=min(2**job_try, 30))
+        except Exception as e:
+            logger.exception("Job %s (%s) hit an unexpected error: %s", job_id, job.type, str(e))
+            await mark_failed(job_id, "An unexpected error occurred while processing the file")
+    finally:
+        await processor.cleanup(job, file_docs, prepared)
+
+
 async def pdf_convert(ctx, job_id: str) -> None:
     from app.services.pdf.processors import PdfConvertProcessor
 
@@ -145,6 +223,21 @@ async def pdf_summarize(ctx, job_id: str) -> None:
         return raw_result  # {"summary": "..."}
 
     await _run_job(ctx, job_id, PdfSummarizeProcessor, build_result)
+
+
+async def pdf_merge(ctx, job_id: str) -> None:
+    from app.services.pdf.processors import MergeProcessor
+
+    async def build_result(job, file_docs, raw_result):
+        output_doc = await save_output_file(
+            local_path=raw_result["output_path"],
+            owner_api_key_id=file_docs[0].ownerApiKeyId,
+            original_filename="merged.pdf",
+            mime_type="application/pdf",
+        )
+        return {"outputFileId": str(output_doc.id)}
+
+    await _run_multi_file_job(ctx, job_id, MergeProcessor, build_result)
 
 
 async def image_ocr(ctx, job_id: str) -> None:
@@ -266,6 +359,7 @@ class WorkerSettings:
         pdf_convert,
         pdf_to_word,
         pdf_summarize,
+        pdf_merge,
         image_ocr,
         text_paraphrase,
         text_summarize,

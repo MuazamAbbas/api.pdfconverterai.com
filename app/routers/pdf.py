@@ -1,13 +1,20 @@
 """`pdf` module routes (Handbook Part C.3).
 
 `test`/`upload` are Tier 1 - synchronous, no job queue. `convert`/
-`to_word`/`summarize` are Tier 2 (Part I.2): each creates a Job, enqueues
-the matching ARQ task (`app/worker.py`), and returns immediately - callers
-poll `GET /jobs/{id}` (`app/routers/jobs.py`) for the result. This is an
-intentional, spec-approved breaking change to those three endpoints' request
-contract (multipart upload -> `{"file_id": "..."}` referencing a file
-already uploaded via `POST /files/upload` or `POST /pdf/upload`) - there is
-no live frontend consumer of them yet.
+`to_word`/`summarize`/`merge` are Tier 2 (Part I.2): each creates a Job,
+enqueues the matching ARQ task (`app/worker.py`), and returns immediately -
+callers poll `GET /jobs/{id}` (`app/routers/jobs.py`) for the result. This is
+an intentional, spec-approved breaking change to `convert`/`to_word`/
+`summarize`'s request contract (multipart upload -> `{"file_id": "..."}`
+referencing a file already uploaded via `POST /files/upload` or
+`POST /pdf/upload`) - there is no live frontend consumer of them yet.
+
+`merge` is the first multi-file Tier 2 tool: request body is
+`{"file_ids": [...]}` instead of a single `file_id`, and the created job's
+`fileIds` field (see `app/schemas/job.py`) carries the full list for the
+worker to consume, while `fileId` still points at the first file so
+`GET /jobs/{id}`'s existing single-file ownership check keeps working
+unchanged.
 """
 import logging
 
@@ -17,16 +24,25 @@ from pydantic import BaseModel
 
 from app.core.security import verify_api_key
 from app.services.files.service import UploadValidationError, get_file_by_id, save_uploaded_file
-from app.services.jobs.service import create_job, mark_failed, mark_queued
+from app.services.jobs.service import create_job, create_multi_file_job, mark_failed, mark_queued
 from app.shared.responses import api_error, envelope
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pdf", tags=["PDF Tools"])
 
+# Aggregate cap for a single /pdf/merge request - see the check in
+# merge_pdf() for why this exists alongside the per-file/per-count caps.
+MAX_MERGE_TOTAL_MB = 250
+MAX_MERGE_TOTAL_BYTES = MAX_MERGE_TOTAL_MB * 1024 * 1024
+
 
 class FileIdRequest(BaseModel):
     file_id: str
+
+
+class FileIdsRequest(BaseModel):
+    file_ids: list[str]
 
 
 @router.get("/test", summary="Test PDF Tools endpoint")
@@ -58,7 +74,13 @@ async def upload_pdf(file: UploadFile = File(...), api_key: dict = Depends(verif
     return envelope(True, "File uploaded", data={"file_id": str(file_doc.id), "filename": file_doc.originalFilename})
 
 
-async def _create_pdf_job(request: Request, file_id: str, job_type: str, api_key: dict) -> dict:
+async def _get_owned_pdf_file(file_id: str, api_key: dict):
+    """Fetch a file by id, checking ownership and `.pdf` extension.
+
+    Shared by `_create_pdf_job` (single-file Tier 2 tools) and `/pdf/merge`
+    (multi-file) so both raise the exact same errors for the exact same
+    conditions.
+    """
     file_doc = await get_file_by_id(file_id)
     if file_doc is None:
         raise api_error(404, "File not found or has expired", "FILE_NOT_FOUND")
@@ -69,6 +91,12 @@ async def _create_pdf_job(request: Request, file_id: str, job_type: str, api_key
 
     if not file_doc.originalFilename.lower().endswith(".pdf"):
         raise api_error(400, "File must be a PDF", "FILE_INVALID_TYPE")
+
+    return file_doc
+
+
+async def _create_pdf_job(request: Request, file_id: str, job_type: str, api_key: dict) -> dict:
+    file_doc = await _get_owned_pdf_file(file_id, api_key)
 
     job = await create_job(file_doc.id, job_type)
     try:
@@ -99,3 +127,49 @@ async def pdf_to_word(payload: FileIdRequest, request: Request, api_key: dict = 
 async def summarize_pdf(payload: FileIdRequest, request: Request, api_key: dict = Depends(verify_api_key)):
     data = await _create_pdf_job(request, payload.file_id, "pdf_summarize", api_key)
     return envelope(True, "Summarization job created", data=data)
+
+
+@router.post("/merge", summary="Merge multiple PDFs into one (async job)")
+async def merge_pdf(
+    payload: FileIdsRequest, request: Request, api_key: dict = Depends(verify_api_key)
+):
+    """First multi-file Tier 2 tool (Handbook Part I.2). Same async-job shape
+    as `/convert`/`/to_word`/`/summarize` - creates a job, enqueues the
+    `pdf_merge` ARQ task, and returns immediately; callers poll
+    `GET /jobs/{id}` for the result.
+    """
+    file_ids = payload.file_ids
+
+    if len(file_ids) < 2:
+        raise api_error(400, "At least 2 files are required to merge", "FILE_COUNT_INVALID")
+    if len(file_ids) > 20:
+        raise api_error(400, "Cannot merge more than 20 files at once", "FILE_COUNT_INVALID")
+    if len(set(file_ids)) != len(file_ids):
+        raise api_error(400, "Duplicate file_ids are not allowed", "FILE_COUNT_INVALID")
+
+    file_docs = [await _get_owned_pdf_file(file_id, api_key) for file_id in file_ids]
+
+    # Per-file size is already bounded by settings.max_upload_size_mb at
+    # upload time, but with up to 20 files that alone still allows a single
+    # merge job up to ~500MB - a large memory/CPU amplification versus every
+    # other Tier 2 PDF job (bounded to one file). Cap the aggregate too
+    # (security-reviewer finding, Merge PDF session).
+    total_bytes = sum(file_doc.sizeBytes for file_doc in file_docs)
+    if total_bytes > MAX_MERGE_TOTAL_BYTES:
+        raise api_error(
+            400,
+            f"Combined file size exceeds the maximum of {MAX_MERGE_TOTAL_MB}MB",
+            "FILE_COUNT_INVALID",
+        )
+
+    job = await create_multi_file_job([file_doc.id for file_doc in file_docs], "pdf_merge")
+    try:
+        await request.app.state.arq_redis.enqueue_job("pdf_merge", str(job.id), _job_id=str(job.id))
+        await mark_queued(str(job.id))
+    except Exception as e:
+        logger.exception("Failed to enqueue job %s (pdf_merge): %s", job.id, str(e))
+        await mark_failed(str(job.id), "Failed to queue job for processing")
+        raise api_error(503, "Job queue is temporarily unavailable", "QUEUE_UNAVAILABLE")
+
+    logger.info("Created job %s (pdf_merge) for files %s", job.id, file_ids)
+    return envelope(True, "Merge job created", data={"job_id": str(job.id), "status": "queued"})

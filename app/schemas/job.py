@@ -34,6 +34,17 @@ class JobBase(BaseModel):
     fileId: PyObjectId = Field(
         ..., description="References files._id — the input file this job processes"
     )
+    fileIds: Optional[list[PyObjectId]] = Field(
+        default=None,
+        description=(
+            "References files._id for every input file, for multi-file job "
+            "types (e.g. pdf_merge). None for single-file job types, which "
+            "continue to use `fileId` only - `fileId` is still set (to the "
+            "first entry) for multi-file jobs too, so existing single-file "
+            "ownership-check code (e.g. GET /jobs/{id}) keeps working "
+            "unchanged."
+        ),
+    )
     # Intentionally a free-form string, not a fixed Enum: the job "type"
     # doubles as the tool identifier, and Tier 2 tools span multiple
     # modules (pdf, image, ai, ...) per Handbook Part I.2. A hardcoded enum
