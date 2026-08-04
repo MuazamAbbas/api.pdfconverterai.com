@@ -69,7 +69,7 @@ async def test_no_pipeline_in_ctx_retries_instead_of_failing(api_key, test_pdf_b
     behavior that's new in this migration (previously the model was loaded
     eagerly at import time, so this state could never happen)."""
     file_doc = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "summarize-no-pipeline-test.pdf")
-    job = await create_job(file_doc.id, "pdf_summarize")
+    job = await create_job(file_doc.id, "pdf_summarize", api_key["id"])
 
     with pytest.raises(Retry):
         await worker.pdf_summarize({"job_try": 1}, str(job.id))
@@ -98,7 +98,7 @@ async def test_permanent_failure_corrupt_pdf_fails_immediately_no_retry(
     `extract_text_from_pdf`'s convention in `convert.py`.
     """
     file_doc = await _make_pdf_file_doc(api_key["id"], corrupt_pdf_bytes, "summarize-corrupt-test.pdf")
-    job = await create_job(file_doc.id, "pdf_summarize")
+    job = await create_job(file_doc.id, "pdf_summarize", api_key["id"])
 
     async def _fake_summarizer(text, **kwargs):
         raise AssertionError("should never be reached: pymupdf can't open a corrupt PDF")
@@ -116,7 +116,7 @@ async def test_transient_failure_exhausted_retries_marks_failed_no_more_retry(ap
     """Same "no pipeline in ctx" transient condition as above, but on the
     final allowed attempt - must fail, not retry again."""
     file_doc = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "summarize-exhausted-test.pdf")
-    job = await create_job(file_doc.id, "pdf_summarize")
+    job = await create_job(file_doc.id, "pdf_summarize", api_key["id"])
 
     await worker.pdf_summarize({"job_try": worker.MAX_TRIES}, str(job.id))
 
@@ -132,7 +132,7 @@ async def test_successful_summarize_with_preloaded_pipeline_completes(api_key, t
     fake pipeline stands in for the real `bart-large-cnn` model here (see
     module docstring)."""
     file_doc = await _make_pdf_file_doc(api_key["id"], test_pdf_bytes, "summarize-success-test.pdf")
-    job = await create_job(file_doc.id, "pdf_summarize")
+    job = await create_job(file_doc.id, "pdf_summarize", api_key["id"])
 
     def _fake_pipeline(text, max_length=150, min_length=30, do_sample=False):
         return [{"summary_text": "A fake but plausible summary."}]

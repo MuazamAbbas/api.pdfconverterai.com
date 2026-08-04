@@ -77,7 +77,7 @@ async def _create_downloaders_job(
     if str(file_doc.ownerApiKeyId) != owner_id:
         raise api_error(403, "Not authorized to use this file", "FILE_FORBIDDEN")
 
-    job = await create_job(file_doc.id, job_type)
+    job = await create_job(file_doc.id, job_type, ObjectId(api_key["key_data"]["_id"]))
     try:
         await request.app.state.arq_redis.enqueue_job(job_type, str(job.id), _job_id=str(job.id))
         await mark_queued(str(job.id))

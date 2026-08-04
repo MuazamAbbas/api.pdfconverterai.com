@@ -64,7 +64,7 @@ async def test_create_job_persists_no_fileids_side_effect_for_single_file_job_ty
     and every other single-file consumer keep seeing exactly the shape they
     did before this field was added."""
     file_id = ObjectId()
-    job = await create_job(file_id, "pdf_convert")
+    job = await create_job(file_id, "pdf_convert", api_key["id"])
     try:
         assert job.fileIds is None
         assert job.fileId == file_id

@@ -67,7 +67,7 @@ async def test_permanent_failure_no_text_detected_fails_immediately_no_retry(
     api_key, blank_image_bytes, monkeypatch
 ):
     file_doc = await _make_file_doc(api_key["id"], blank_image_bytes, "blank-retry-test.png")
-    job = await create_job(file_doc.id, "image_ocr")
+    job = await create_job(file_doc.id, "image_ocr", api_key["id"])
 
     async def _no_text(image_data: bytes) -> str:
         raise ValueError("No text detected in image")
@@ -85,7 +85,7 @@ async def test_permanent_failure_no_text_detected_fails_immediately_no_retry(
 
 async def test_transient_failure_retries_below_max_tries(api_key, image_with_text_bytes, monkeypatch):
     file_doc = await _make_file_doc(api_key["id"], image_with_text_bytes, "transient-retry-test.png")
-    job = await create_job(file_doc.id, "image_ocr")
+    job = await create_job(file_doc.id, "image_ocr", api_key["id"])
 
     async def _boom(image_data: bytes) -> str:
         raise OSError("simulated transient disk hiccup")
@@ -107,7 +107,7 @@ async def test_transient_failure_exhausted_retries_marks_failed_no_more_retry(
     file_doc = await _make_file_doc(
         api_key["id"], image_with_text_bytes, "transient-exhausted-test.png"
     )
-    job = await create_job(file_doc.id, "image_ocr")
+    job = await create_job(file_doc.id, "image_ocr", api_key["id"])
 
     async def _boom(image_data: bytes) -> str:
         raise OSError("simulated transient disk hiccup")
@@ -130,7 +130,7 @@ async def test_successful_ocr_after_transient_retry_completes(api_key, image_wit
     file_doc = await _make_file_doc(
         api_key["id"], image_with_text_bytes, "transient-recovers-test.png"
     )
-    job = await create_job(file_doc.id, "image_ocr")
+    job = await create_job(file_doc.id, "image_ocr", api_key["id"])
 
     calls = {"n": 0}
 

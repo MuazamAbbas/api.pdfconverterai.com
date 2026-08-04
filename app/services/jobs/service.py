@@ -25,15 +25,21 @@ def _to_object_id(job_id: str) -> Optional[ObjectId]:
         return None
 
 
-async def create_job(file_id: ObjectId, job_type: str) -> JobDocument:
-    job_create = JobCreate(fileId=file_id, type=job_type)
+async def create_job(file_id: ObjectId, job_type: str, owner_id: ObjectId) -> JobDocument:
+    # ADR-016: owner_id is required (not Optional) here — every new job
+    # creation must stamp an owner. Optionality of `ownerApiKeyId` lives
+    # only on the schema field, to tolerate pre-existing legacy docs that
+    # predate this fix (see JobBase.ownerApiKeyId docstring).
+    job_create = JobCreate(fileId=file_id, type=job_type, ownerApiKeyId=owner_id)
     insert_result = await db.jobs.insert_one(job_create.model_dump(by_alias=True))
     doc = await db.jobs.find_one({"_id": insert_result.inserted_id})
     logger.info("Created job %s type=%s file=%s", insert_result.inserted_id, job_type, file_id)
     return JobDocument(**doc)
 
 
-async def create_multi_file_job(file_ids: list[ObjectId], job_type: str) -> JobDocument:
+async def create_multi_file_job(
+    file_ids: list[ObjectId], job_type: str, owner_id: ObjectId
+) -> JobDocument:
     """Same as `create_job`, but for Tier 2 tools that take multiple input
     files (e.g. `pdf_merge`, ADR-003 / Handbook Part I.2).
 
@@ -42,8 +48,12 @@ async def create_multi_file_job(file_ids: list[ObjectId], job_type: str) -> JobD
     `GET /jobs/{id}`'s ownership check in `app/routers/jobs.py` - keep
     working unchanged without needing to special-case multi-file job types.
     `fileIds` carries the full list for job types that need it.
+
+    `owner_id` is required for the same ADR-016 reason as `create_job`.
     """
-    job_create = JobCreate(fileId=file_ids[0], fileIds=file_ids, type=job_type)
+    job_create = JobCreate(
+        fileId=file_ids[0], fileIds=file_ids, type=job_type, ownerApiKeyId=owner_id
+    )
     insert_result = await db.jobs.insert_one(job_create.model_dump(by_alias=True))
     doc = await db.jobs.find_one({"_id": insert_result.inserted_id})
     logger.info(
