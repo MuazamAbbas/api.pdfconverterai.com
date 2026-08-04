@@ -45,7 +45,7 @@ async def url_encode(request: URLEncodeRequest, api_key: dict = Depends(verify_a
         return {"original_url": request.url, "encoded_url": encoded_url}
     except Exception as e:
         logger.exception("💥 Error encoding URL: %s", str(e))
-        raise HTTPException(status_code=500, detail=f"Error encoding URL: {str(e)}")
+        raise api_error(500, "Failed to encode URL", "URL_ENCODE_FAILED")
 
 @router.post("/upload", summary="Upload a URL for webpage summarization jobs")
 async def upload_web_tools(payload: URLUploadRequest, api_key: dict = Depends(verify_api_key)):
@@ -148,10 +148,20 @@ async def validate_url(request: URLRequest, api_key: dict = Depends(verify_api_k
             return {"url": request.url, "is_valid": is_valid, "status_code": status}
     except aiohttp.ClientResponseError as e:
         logger.exception("💥 Client response error validating URL: %s", str(e))
-        return {"url": request.url, "is_valid": False, "status_code": e.status, "error": str(e)}
+        return {
+            "url": request.url,
+            "is_valid": False,
+            "status_code": e.status,
+            "error": "The URL returned an error response",
+        }
     except aiohttp.ClientError as e:
         logger.exception("💥 Client error validating URL: %s", str(e))
-        return {"url": request.url, "is_valid": False, "status_code": None, "error": str(e)}
+        return {
+            "url": request.url,
+            "is_valid": False,
+            "status_code": None,
+            "error": "Unable to reach the URL",
+        }
     except Exception as e:
         logger.exception("💥 Error validating URL: %s", str(e))
-        return {"url": request.url, "is_valid": False, "status_code": None, "error": str(e)}
+        raise api_error(500, "Failed to validate URL", "URL_VALIDATION_FAILED")
