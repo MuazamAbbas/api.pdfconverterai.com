@@ -240,6 +240,22 @@ async def pdf_merge(ctx, job_id: str) -> None:
     await _run_multi_file_job(ctx, job_id, MergeProcessor, build_result)
 
 
+async def pdf_split(ctx, job_id: str) -> None:
+    from app.services.pdf.processors import SplitProcessor
+
+    async def build_result(job, file_doc, raw_result):
+        base_name = os.path.splitext(file_doc.originalFilename)[0]
+        output_doc = await save_output_file(
+            local_path=raw_result["output_path"],
+            owner_api_key_id=file_doc.ownerApiKeyId,
+            original_filename=f"{base_name}-split.zip",
+            mime_type="application/zip",
+        )
+        return {"outputFileId": str(output_doc.id)}
+
+    await _run_job(ctx, job_id, SplitProcessor, build_result)
+
+
 async def image_ocr(ctx, job_id: str) -> None:
     from app.services.image.processors import ImageOcrProcessor
 
@@ -360,6 +376,7 @@ class WorkerSettings:
         pdf_to_word,
         pdf_summarize,
         pdf_merge,
+        pdf_split,
         image_ocr,
         text_paraphrase,
         text_summarize,

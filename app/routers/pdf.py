@@ -1,13 +1,14 @@
 """`pdf` module routes (Handbook Part C.3).
 
 `test`/`upload` are Tier 1 - synchronous, no job queue. `convert`/
-`to_word`/`summarize`/`merge` are Tier 2 (Part I.2): each creates a Job,
-enqueues the matching ARQ task (`app/worker.py`), and returns immediately -
-callers poll `GET /jobs/{id}` (`app/routers/jobs.py`) for the result. This is
-an intentional, spec-approved breaking change to `convert`/`to_word`/
-`summarize`'s request contract (multipart upload -> `{"file_id": "..."}`
-referencing a file already uploaded via `POST /files/upload` or
-`POST /pdf/upload`) - there is no live frontend consumer of them yet.
+`to_word`/`summarize`/`merge`/`split` are Tier 2 (Part I.2): each creates a
+Job, enqueues the matching ARQ task (`app/worker.py`), and returns
+immediately - callers poll `GET /jobs/{id}` (`app/routers/jobs.py`) for the
+result. This is an intentional, spec-approved breaking change to `convert`/
+`to_word`/`summarize`'s request contract (multipart upload ->
+`{"file_id": "..."}` referencing a file already uploaded via
+`POST /files/upload` or `POST /pdf/upload`) - there is no live frontend
+consumer of them yet.
 
 `merge` is the first multi-file Tier 2 tool: request body is
 `{"file_ids": [...]}` instead of a single `file_id`, and the created job's
@@ -15,12 +16,21 @@ referencing a file already uploaded via `POST /files/upload` or
 worker to consume, while `fileId` still points at the first file so
 `GET /jobs/{id}`'s existing single-file ownership check keeps working
 unchanged.
+
+`split` is single-file (like `convert`/`to_word`/`summarize`), request body
+is `{"file_id": "...", "ranges": "1-3,5,7-9"}`. Beyond the plain non-empty
+check done here, `ranges` is threaded through unvalidated to the worker via
+the created job's generic `params` field (see `app/schemas/job.py`'s
+`JobBase.params`) - real range-syntax/page-count validation happens in
+`SplitProcessor.validate()` (`app/services/pdf/processors.py`), since it
+needs the PDF's actual page count to check bounds.
 """
 import logging
+from typing import Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, File, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.security import verify_api_key
 from app.services.files.service import UploadValidationError, get_file_by_id, save_uploaded_file
@@ -43,6 +53,19 @@ class FileIdRequest(BaseModel):
 
 class FileIdsRequest(BaseModel):
     file_ids: list[str]
+
+
+class SplitRequest(BaseModel):
+    file_id: str
+    # Cheap first line of defense against a huge `ranges` payload, ahead of
+    # the real range-count/output-page caps (`MAX_SPLIT_RANGES`,
+    # `MAX_SPLIT_OUTPUT_PAGES` in `app/services/pdf/processors.py`'s
+    # `_parse_ranges`) - a 2000-char budget comfortably covers 100 ranges of
+    # up to 5-digit page numbers each (e.g. "12345-67890,...") with room to
+    # spare, while capping a naive huge-string DoS before it's even parsed.
+    # Violations are caught by `app/main.py`'s `RequestValidationError`
+    # handler, which already returns the standard error envelope.
+    ranges: str = Field(..., max_length=2000)
 
 
 @router.get("/test", summary="Test PDF Tools endpoint")
@@ -95,10 +118,18 @@ async def _get_owned_pdf_file(file_id: str, api_key: dict):
     return file_doc
 
 
-async def _create_pdf_job(request: Request, file_id: str, job_type: str, api_key: dict) -> dict:
+async def _create_pdf_job(
+    request: Request,
+    file_id: str,
+    job_type: str,
+    api_key: dict,
+    params: Optional[dict] = None,
+) -> dict:
     file_doc = await _get_owned_pdf_file(file_id, api_key)
 
-    job = await create_job(file_doc.id, job_type, ObjectId(api_key["key_data"]["_id"]))
+    job = await create_job(
+        file_doc.id, job_type, ObjectId(api_key["key_data"]["_id"]), params=params
+    )
     try:
         await request.app.state.arq_redis.enqueue_job(job_type, str(job.id), _job_id=str(job.id))
         await mark_queued(str(job.id))
@@ -175,3 +206,21 @@ async def merge_pdf(
 
     logger.info("Created job %s (pdf_merge) for files %s", job.id, file_ids)
     return envelope(True, "Merge job created", data={"job_id": str(job.id), "status": "queued"})
+
+
+@router.post("/split", summary="Split a PDF by page ranges into a zip of PDFs (async job)")
+async def split_pdf(payload: SplitRequest, request: Request, api_key: dict = Depends(verify_api_key)):
+    """Single-file Tier 2 tool, same shape as `/convert`/`/to_word`/
+    `/summarize`. Only a cheap non-empty check on `ranges` happens here -
+    real range-syntax and page-count validation happens in
+    `SplitProcessor.validate()` (`app/services/pdf/processors.py`), which
+    needs the PDF's real page count. `ranges` is threaded to the worker via
+    the job's generic `params` field (see this module's docstring).
+    """
+    if not payload.ranges or not payload.ranges.strip():
+        raise api_error(400, "ranges must not be empty", "RANGES_INVALID")
+
+    data = await _create_pdf_job(
+        request, payload.file_id, "pdf_split", api_key, params={"ranges": payload.ranges}
+    )
+    return envelope(True, "Split job created", data=data)

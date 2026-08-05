@@ -103,6 +103,20 @@ class JobBase(BaseModel):
             "via app/services/jobs/service.py now always sets this."
         ),
     )
+    # Generic, job-type-specific input parameters (e.g. pdf_split's
+    # `{"ranges": "1-3,5,7-9"}`) — deliberately named generically rather
+    # than something like `ranges` so this stays reusable for future
+    # single-file Tier 2 tools that need extra caller-supplied input beyond
+    # `fileId`, without repeatedly extending this shared schema file (Part
+    # C.3 "one module = one responsibility"). `job` already flows through
+    # every step of `Processor.run()` (`app/services/jobs/processor.py`),
+    # so processors read their own params off `job.params` rather than the
+    # base class needing new method signatures. None for job types that
+    # don't need extra input (the vast majority).
+    params: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Job-type-specific input parameters, e.g. pdf_split's ranges string.",
+    )
 
 
 class JobCreate(JobBase):

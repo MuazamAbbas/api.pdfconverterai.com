@@ -1,4 +1,4 @@
-"""Concrete Processors for the three Tier 2 PDF jobs (Handbook Part C.4,
+"""Concrete Processors for the Tier 2 PDF jobs (Handbook Part C.4,
 ADR-003). Each implements the shared Validate/Prepare/Execute/Verify/
 Cleanup interface from `app/services/jobs/processor.py`; `app/worker.py`'s
 task functions are the thin ARQ-facing wrappers that call `.run()` and own
@@ -19,6 +19,16 @@ pipeline is loaded once per worker process in `app/worker.py`'s
 `on_startup` hook and passed down through `Processor.run(job, file_doc,
 ctx)` -> `execute(job, file_doc, prepared, ctx)` as `ctx["summarizer_pipeline"]`.
 
+`SplitProcessor` (job.type == "pdf_split") reads its `ranges` input off
+`job.params["ranges"]` (see `app/schemas/job.py`'s `JobBase.params`) rather
+than a new method parameter, since `job` already flows through every step
+of `Processor.run()` unchanged - keeps the base `Processor` interface
+untouched for every other processor in this file. It parses and validates
+that string in `validate()` (needs the PDF's real page count, opened via
+PyPDF2 there) and stashes the parsed `(start, end)` tuples on `self` for
+`prepare()` to pick up - safe because `app/worker.py` creates one fresh
+Processor instance per job run (see `_run_job`'s `make_processor()` call).
+
 `MergeProcessor` (job.type == "pdf_merge") is the first multi-file Tier 2
 tool (Handbook Part I.2) and deliberately does NOT subclass `Processor`
 (`app/services/jobs/processor.py`) - the base class's
@@ -34,6 +44,7 @@ route through the unmodified `.run()` here.
 """
 import logging
 import os
+import zipfile
 
 import PyPDF2
 
@@ -53,6 +64,93 @@ def _validate_pdf_input(file_doc) -> None:
         raise PermanentProcessingError("File must be a PDF")
     if not os.path.exists(file_doc.storagePath):
         raise PermanentProcessingError("Source file is missing or has expired")
+
+
+# `SplitProcessor.execute()` does one `PyPDF2.PdfWriter` instantiation +
+# disk write per accepted range, plus one `zipfile` entry per range - all
+# driven by this attacker-controlled free-text field. Without a cap, a
+# tiny (few-KB) many-thousand-blank-page PDF plus a long `ranges` string
+# (e.g. the same in-bounds page repeated thousands of times, or "1,2,...,N")
+# turns one job into thousands of file writes/zip operations - real
+# resource amplification versus the ~25MB single-input-file cap every other
+# single-file PDF job is implicitly bounded by (`max_upload_size_mb`,
+# `app/core/config.py`). Mirrors the aggregate-cap pattern
+# `MAX_MERGE_TOTAL_BYTES` uses in `app/routers/pdf.py` for the same DoS
+# class on `/pdf/merge`, but lives here (not the router) since this is
+# where the range string is actually parsed and the real page count is
+# available.
+#
+# 100 output files from a single split request comfortably covers every
+# legitimate use case (splitting a document into per-chapter/per-page
+# files) while keeping worst-case PdfWriter/zip work per job small. 1000
+# total output pages keeps the sum of per-range page spans (a single
+# `"1-100000"` range would otherwise bypass the range-count cap entirely)
+# proportional to a realistically-sized document rather than attacker-
+# inflated by a cheap, mostly-blank-page PDF.
+MAX_SPLIT_RANGES = 100
+MAX_SPLIT_OUTPUT_PAGES = 1000
+
+
+def _parse_ranges(ranges_str: str, page_count: int) -> list[tuple[int, int]]:
+    """Parse a `"1-3,5,7-9"`-style page-range string into a list of
+    1-indexed, inclusive `(start, end)` tuples, validated against the PDF's
+    real `page_count`.
+
+    Also enforces `MAX_SPLIT_RANGES` (number of comma-separated segments)
+    and `MAX_SPLIT_OUTPUT_PAGES` (sum of pages across all accepted ranges)
+    - see the comment above those constants for why.
+
+    Every rejection path raises `PermanentProcessingError` with a fixed,
+    client-safe message rather than surfacing raw parser internals (same
+    error-leak-class discipline as issues #27/#29/#31/#39) - there's no
+    third-party exception here to leak from, but the messages stay generic
+    on principle/consistency with the rest of this module.
+    """
+    parsed: list[tuple[int, int]] = []
+    total_output_pages = 0
+    for raw_part in ranges_str.split(","):
+        part = raw_part.strip()
+        if not part:
+            raise PermanentProcessingError("Invalid page range syntax")
+
+        if len(parsed) >= MAX_SPLIT_RANGES:
+            raise PermanentProcessingError(
+                f"Too many page ranges (maximum {MAX_SPLIT_RANGES})"
+            )
+
+        if "-" in part:
+            segments = part.split("-")
+            if len(segments) != 2:
+                raise PermanentProcessingError("Invalid page range syntax")
+            start_str, end_str = segments[0].strip(), segments[1].strip()
+            if not start_str.isdigit() or not end_str.isdigit():
+                raise PermanentProcessingError("Invalid page range syntax")
+            start, end = int(start_str), int(end_str)
+        else:
+            if not part.isdigit():
+                raise PermanentProcessingError("Invalid page range syntax")
+            start = end = int(part)
+
+        if start <= 0 or end <= 0:
+            raise PermanentProcessingError("Page numbers must be greater than 0")
+        if start > end:
+            raise PermanentProcessingError("A range's start page cannot be after its end page")
+        if end > page_count:
+            raise PermanentProcessingError(
+                f"Page range exceeds the document's page count ({page_count})"
+            )
+
+        total_output_pages += end - start + 1
+        if total_output_pages > MAX_SPLIT_OUTPUT_PAGES:
+            raise PermanentProcessingError(
+                f"Total requested output pages exceed the maximum of {MAX_SPLIT_OUTPUT_PAGES}"
+            )
+
+        parsed.append((start, end))
+
+    if not parsed:
+        raise PermanentProcessingError("No valid page ranges were provided")
+    return parsed
 
 
 class PdfConvertProcessor(Processor):
@@ -111,6 +209,93 @@ class PdfToWordProcessor(Processor):
         output_path = result.get("output_path")
         if not output_path or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             raise PermanentProcessingError("Word conversion produced no output")
+
+
+class SplitProcessor(Processor):
+    """job.type == "pdf_split"
+
+    Reads its `ranges` input off `job.params["ranges"]` - see this module's
+    docstring for why (generic `Job.params` field rather than a new
+    `Processor` method parameter).
+    """
+
+    async def validate(self, job, file_doc):
+        _validate_pdf_input(file_doc)
+
+        ranges_str = (job.params or {}).get("ranges") if job.params else None
+        if not ranges_str or not ranges_str.strip():
+            raise PermanentProcessingError("No page ranges were provided")
+
+        try:
+            reader = PyPDF2.PdfReader(file_doc.storagePath)
+            page_count = len(reader.pages)
+        except PyPDF2.errors.PyPdfError as e:
+            # Fixed, hardcoded message rather than `str(e)` - decouples this
+            # client-facing contract from PyPDF2's text (issue #39 - Batch 5
+            # of the #27/#29/#31 error leak class).
+            raise PermanentProcessingError("Invalid or unreadable PDF file") from e
+        except OSError as e:
+            raise TransientProcessingError("Temporary I/O error while reading the file") from e
+
+        # Stashed on `self` for `prepare()` - see module docstring for why
+        # this is safe (one Processor instance per job run).
+        self._parsed_ranges = _parse_ranges(ranges_str, page_count)
+
+    async def prepare(self, job, file_doc):
+        os.makedirs(STORAGE_PATH, exist_ok=True)
+        return {
+            "path": file_doc.storagePath,
+            "ranges": self._parsed_ranges,
+            "output_dir": STORAGE_PATH,
+        }
+
+    async def execute(self, job, file_doc, prepared, ctx=None):
+        ranges = prepared["ranges"]
+        output_dir = prepared["output_dir"]
+        zip_path = os.path.join(output_dir, f"split-{job.id}-{os.getpid()}.zip")
+        part_paths: list[str] = []
+        try:
+            try:
+                reader = PyPDF2.PdfReader(prepared["path"])
+                for index, (start, end) in enumerate(ranges, start=1):
+                    writer = PyPDF2.PdfWriter()
+                    for page_num in range(start - 1, end):
+                        writer.add_page(reader.pages[page_num])
+                    part_path = os.path.join(output_dir, f"split-{job.id}-{index}.pdf")
+                    with open(part_path, "wb") as f:
+                        writer.write(f)
+                    part_paths.append(part_path)
+
+                with zipfile.ZipFile(zip_path, "w") as zf:
+                    for index, part_path in enumerate(part_paths, start=1):
+                        zf.write(part_path, arcname=f"split-{index}.pdf")
+            except PyPDF2.errors.PyPdfError as e:
+                # Fixed, hardcoded message rather than `str(e)` - decouples
+                # this client-facing contract from PyPDF2's text (issue #39
+                # - Batch 5 of the #27/#29/#31 error leak class).
+                raise PermanentProcessingError(
+                    "The PDF file is invalid or could not be split"
+                ) from e
+            except OSError as e:
+                raise TransientProcessingError(
+                    "Temporary I/O error while splitting the file"
+                ) from e
+        finally:
+            # Keep only the zip - delete the intermediate per-range PDFs
+            # once they're bundled in (or on error, so a failed job doesn't
+            # leave orphaned per-range files behind).
+            for part_path in part_paths:
+                if os.path.exists(part_path):
+                    try:
+                        os.remove(part_path)
+                    except OSError:
+                        logger.warning("Failed to remove intermediate split file %s", part_path)
+        return {"output_path": zip_path}
+
+    async def verify(self, job, file_doc, result):
+        output_path = result.get("output_path")
+        if not output_path or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise PermanentProcessingError("Splitting produced no output")
 
 
 class PdfSummarizeProcessor(Processor):
