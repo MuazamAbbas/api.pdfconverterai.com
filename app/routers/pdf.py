@@ -30,7 +30,7 @@ from typing import Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, File, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.security import verify_api_key
 from app.services.files.service import UploadValidationError, get_file_by_id, save_uploaded_file
@@ -57,7 +57,15 @@ class FileIdsRequest(BaseModel):
 
 class SplitRequest(BaseModel):
     file_id: str
-    ranges: str
+    # Cheap first line of defense against a huge `ranges` payload, ahead of
+    # the real range-count/output-page caps (`MAX_SPLIT_RANGES`,
+    # `MAX_SPLIT_OUTPUT_PAGES` in `app/services/pdf/processors.py`'s
+    # `_parse_ranges`) - a 2000-char budget comfortably covers 100 ranges of
+    # up to 5-digit page numbers each (e.g. "12345-67890,...") with room to
+    # spare, while capping a naive huge-string DoS before it's even parsed.
+    # Violations are caught by `app/main.py`'s `RequestValidationError`
+    # handler, which already returns the standard error envelope.
+    ranges: str = Field(..., max_length=2000)
 
 
 @router.get("/test", summary="Test PDF Tools endpoint")

@@ -132,6 +132,26 @@ async def test_split_rejects_whitespace_only_ranges_string(client, api_key, test
     assert body["error"]["code"] == "RANGES_INVALID"
 
 
+async def test_split_rejects_oversized_ranges_string(client, api_key, test_pdf_bytes):
+    """`SplitRequest.ranges` has a 2000-char `max_length` (security-reviewer
+    finding: a first line of defense against a huge `ranges` payload, ahead
+    of `_parse_ranges`'s `MAX_SPLIT_RANGES`/`MAX_SPLIT_OUTPUT_PAGES` caps).
+    Violations are caught by FastAPI's request validation, which
+    `app/main.py`'s `RequestValidationError` handler turns into the standard
+    error envelope rather than the stock `{"detail": [...]}` shape."""
+    file_id = await _upload_pdf(client, api_key, "oversized-ranges.pdf", test_pdf_bytes)
+
+    resp = await client.post(
+        "/v1/pdf/split",
+        json={"file_id": file_id, "ranges": "1," * 1001},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
 async def test_split_rejects_file_not_owned_by_caller(client, api_key, other_api_key, test_pdf_bytes):
     other_owned_file_id = await _upload_pdf(client, other_api_key, "not-owned.pdf", test_pdf_bytes)
 

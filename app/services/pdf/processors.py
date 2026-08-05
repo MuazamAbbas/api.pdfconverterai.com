@@ -66,10 +66,39 @@ def _validate_pdf_input(file_doc) -> None:
         raise PermanentProcessingError("Source file is missing or has expired")
 
 
+# `SplitProcessor.execute()` does one `PyPDF2.PdfWriter` instantiation +
+# disk write per accepted range, plus one `zipfile` entry per range - all
+# driven by this attacker-controlled free-text field. Without a cap, a
+# tiny (few-KB) many-thousand-blank-page PDF plus a long `ranges` string
+# (e.g. the same in-bounds page repeated thousands of times, or "1,2,...,N")
+# turns one job into thousands of file writes/zip operations - real
+# resource amplification versus the ~25MB single-input-file cap every other
+# single-file PDF job is implicitly bounded by (`max_upload_size_mb`,
+# `app/core/config.py`). Mirrors the aggregate-cap pattern
+# `MAX_MERGE_TOTAL_BYTES` uses in `app/routers/pdf.py` for the same DoS
+# class on `/pdf/merge`, but lives here (not the router) since this is
+# where the range string is actually parsed and the real page count is
+# available.
+#
+# 100 output files from a single split request comfortably covers every
+# legitimate use case (splitting a document into per-chapter/per-page
+# files) while keeping worst-case PdfWriter/zip work per job small. 1000
+# total output pages keeps the sum of per-range page spans (a single
+# `"1-100000"` range would otherwise bypass the range-count cap entirely)
+# proportional to a realistically-sized document rather than attacker-
+# inflated by a cheap, mostly-blank-page PDF.
+MAX_SPLIT_RANGES = 100
+MAX_SPLIT_OUTPUT_PAGES = 1000
+
+
 def _parse_ranges(ranges_str: str, page_count: int) -> list[tuple[int, int]]:
     """Parse a `"1-3,5,7-9"`-style page-range string into a list of
     1-indexed, inclusive `(start, end)` tuples, validated against the PDF's
     real `page_count`.
+
+    Also enforces `MAX_SPLIT_RANGES` (number of comma-separated segments)
+    and `MAX_SPLIT_OUTPUT_PAGES` (sum of pages across all accepted ranges)
+    - see the comment above those constants for why.
 
     Every rejection path raises `PermanentProcessingError` with a fixed,
     client-safe message rather than surfacing raw parser internals (same
@@ -78,10 +107,16 @@ def _parse_ranges(ranges_str: str, page_count: int) -> list[tuple[int, int]]:
     on principle/consistency with the rest of this module.
     """
     parsed: list[tuple[int, int]] = []
+    total_output_pages = 0
     for raw_part in ranges_str.split(","):
         part = raw_part.strip()
         if not part:
             raise PermanentProcessingError("Invalid page range syntax")
+
+        if len(parsed) >= MAX_SPLIT_RANGES:
+            raise PermanentProcessingError(
+                f"Too many page ranges (maximum {MAX_SPLIT_RANGES})"
+            )
 
         if "-" in part:
             segments = part.split("-")
@@ -103,6 +138,12 @@ def _parse_ranges(ranges_str: str, page_count: int) -> list[tuple[int, int]]:
         if end > page_count:
             raise PermanentProcessingError(
                 f"Page range exceeds the document's page count ({page_count})"
+            )
+
+        total_output_pages += end - start + 1
+        if total_output_pages > MAX_SPLIT_OUTPUT_PAGES:
+            raise PermanentProcessingError(
+                f"Total requested output pages exceed the maximum of {MAX_SPLIT_OUTPUT_PAGES}"
             )
 
         parsed.append((start, end))

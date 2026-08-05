@@ -15,7 +15,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.jobs.processor import PermanentProcessingError
-from app.services.pdf.processors import SplitProcessor, _parse_ranges
+from app.services.pdf.processors import (
+    MAX_SPLIT_OUTPUT_PAGES,
+    MAX_SPLIT_RANGES,
+    SplitProcessor,
+    _parse_ranges,
+)
 
 # Matches every other test module's module-level marker (see
 # tests/test_worker_retry.py's comment) - even though this module's own
@@ -86,6 +91,59 @@ async def test_parse_ranges_rejects_whitespace_only_string():
     with pytest.raises(PermanentProcessingError) as exc_info:
         _parse_ranges("   ", page_count=10)
     assert str(exc_info.value) == "Invalid page range syntax"
+
+
+# --- resource-amplification DoS caps (security-reviewer finding) -----------
+
+
+async def test_parse_ranges_rejects_too_many_ranges():
+    """`MAX_SPLIT_RANGES` single-page ranges are accepted; one more is
+    rejected before it's ever appended - repeating the same in-bounds page
+    thousands of times (e.g. "1,1,1,...") must not silently pass through and
+    reach `SplitProcessor.execute()`'s one-PdfWriter/one-zip-entry-per-range
+    loop."""
+    ranges_str = ",".join(["1"] * (MAX_SPLIT_RANGES + 1))
+    with pytest.raises(PermanentProcessingError) as exc_info:
+        _parse_ranges(ranges_str, page_count=10)
+    assert str(exc_info.value) == f"Too many page ranges (maximum {MAX_SPLIT_RANGES})"
+
+
+async def test_parse_ranges_accepts_exactly_max_ranges():
+    ranges_str = ",".join(["1"] * MAX_SPLIT_RANGES)
+    assert _parse_ranges(ranges_str, page_count=10) == [(1, 1)] * MAX_SPLIT_RANGES
+
+
+async def test_parse_ranges_rejects_total_output_pages_over_cap():
+    """A *single* range spanning more than `MAX_SPLIT_OUTPUT_PAGES` pages
+    must be rejected even though it's just one range - `MAX_SPLIT_RANGES`
+    alone wouldn't stop a large-page-count-but-small-byte-size PDF (e.g.
+    thousands of blank pages) from producing a huge split output via
+    `"1-100000"`."""
+    with pytest.raises(PermanentProcessingError) as exc_info:
+        _parse_ranges(f"1-{MAX_SPLIT_OUTPUT_PAGES + 1}", page_count=MAX_SPLIT_OUTPUT_PAGES + 1)
+    assert (
+        str(exc_info.value)
+        == f"Total requested output pages exceed the maximum of {MAX_SPLIT_OUTPUT_PAGES}"
+    )
+
+
+async def test_parse_ranges_rejects_output_pages_over_cap_across_multiple_ranges():
+    """Same cap, but tripped by the *sum* of several individually-valid
+    ranges rather than a single oversized one."""
+    half = MAX_SPLIT_OUTPUT_PAGES // 2
+    ranges_str = f"1-{half + 1},{half + 2}-{2 * half + 2}"
+    with pytest.raises(PermanentProcessingError) as exc_info:
+        _parse_ranges(ranges_str, page_count=2 * half + 2)
+    assert (
+        str(exc_info.value)
+        == f"Total requested output pages exceed the maximum of {MAX_SPLIT_OUTPUT_PAGES}"
+    )
+
+
+async def test_parse_ranges_accepts_exactly_max_output_pages():
+    assert _parse_ranges(
+        f"1-{MAX_SPLIT_OUTPUT_PAGES}", page_count=MAX_SPLIT_OUTPUT_PAGES
+    ) == [(1, MAX_SPLIT_OUTPUT_PAGES)]
 
 
 # --- SplitProcessor.validate() ------------------------------------------------
