@@ -25,12 +25,18 @@ def _to_object_id(job_id: str) -> Optional[ObjectId]:
         return None
 
 
-async def create_job(file_id: ObjectId, job_type: str, owner_id: ObjectId) -> JobDocument:
+async def create_job(
+    file_id: ObjectId, job_type: str, owner_id: ObjectId, params: Optional[dict[str, Any]] = None
+) -> JobDocument:
     # ADR-016: owner_id is required (not Optional) here — every new job
     # creation must stamp an owner. Optionality of `ownerApiKeyId` lives
     # only on the schema field, to tolerate pre-existing legacy docs that
     # predate this fix (see JobBase.ownerApiKeyId docstring).
-    job_create = JobCreate(fileId=file_id, type=job_type, ownerApiKeyId=owner_id)
+    #
+    # `params` is optional, job-type-specific input (e.g. pdf_split's
+    # `{"ranges": "..."}`) — see JobBase.params in app/schemas/job.py for why
+    # this is generic rather than a dedicated field per tool.
+    job_create = JobCreate(fileId=file_id, type=job_type, ownerApiKeyId=owner_id, params=params)
     insert_result = await db.jobs.insert_one(job_create.model_dump(by_alias=True))
     doc = await db.jobs.find_one({"_id": insert_result.inserted_id})
     logger.info("Created job %s type=%s file=%s", insert_result.inserted_id, job_type, file_id)
