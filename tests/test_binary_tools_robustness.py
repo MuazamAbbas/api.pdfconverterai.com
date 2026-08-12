@@ -10,6 +10,18 @@ encoding (`format(byte, '08b') for byte in request.text.encode('utf-8')`),
 and for the new `binary_to_text` endpoint (`POST /v1/binary_tools/
 binary_to_text`) added in the same commit.
 
+Also covers the follow-up `fix/binary-tools-utf8-encoding` fast-follow that
+bounds both request models (`text: str = Field(..., min_length=1,
+max_length=10000)` on `TextToBinaryRequest`, matching `app/models/text.py`'s
+`TextRequest` exactly; `binary: str = Field(..., min_length=1,
+max_length=100000)` on `BinaryToTextRequest`) after a security-reviewer pass
+flagged unbounded synchronous work inside `async def` handlers as a High
+severity DoS risk on the 2-worker gunicorn config. The old manual
+`if not request.text` / `if not request.binary` checks were removed as dead
+code once `min_length=1` made them unreachable, matching the convention in
+`app/routers/text.py` and `app/routers/miscellaneous.py`, which rely on
+Pydantic's 422 alone with no manual empty-string check.
+
 `text_to_binary` and `binary_to_text` have no separately-importable service
 function to monkeypatch - their whole bodies are inline. The forced-500
 tests shadow module-global builtin names (Python's `LOAD_GLOBAL` for a bare
@@ -199,14 +211,56 @@ async def test_binary_to_text_invalid_utf8_sequence_returns_400(client, api_key,
     assert body["error"]["code"] == "INVALID_UTF8_SEQUENCE"
 
 
-async def test_binary_to_text_empty_binary_returns_400(client, api_key):
+async def test_binary_to_text_empty_binary_returns_422(client, api_key):
+    """`binary` now carries `min_length=1` (matching `app/models/text.py`'s
+    convention), so an empty string is rejected by Pydantic before the
+    handler's manual empty-check (removed as dead code) would ever run."""
     resp = await client.post(
         "/v1/binary_tools/binary_to_text",
         json={"binary": ""},
         headers={"X-API-Key": api_key["key"]},
     )
-    assert resp.status_code == 400, resp.text
-    assert resp.json()["message"] == "Binary is required"
+    assert resp.status_code == 422, resp.text
+
+
+async def test_text_to_binary_empty_text_returns_422(client, api_key):
+    """Same convention as `binary_to_text`: `text` carries `min_length=1`,
+    so Pydantic rejects an empty string with a 422 before the handler runs."""
+    resp = await client.post(
+        "/v1/binary_tools/text_to_binary",
+        json={"text": ""},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_text_to_binary_text_over_max_length_returns_422(client, api_key):
+    resp = await client.post(
+        "/v1/binary_tools/text_to_binary",
+        json={"text": "a" * 10001},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_text_to_binary_text_at_max_length_returns_200(client, api_key):
+    resp = await client.post(
+        "/v1/binary_tools/text_to_binary",
+        json={"text": "a" * 10000},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_binary_to_text_binary_over_max_length_returns_422(client, api_key):
+    # 100001 chars exceeds the 100000-char bound; content doesn't matter
+    # since the length check happens before any group validation.
+    resp = await client.post(
+        "/v1/binary_tools/binary_to_text",
+        json={"binary": "0" * 100001},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422, resp.text
 
 
 async def test_binary_to_text_missing_binary_field_returns_400(client, api_key):

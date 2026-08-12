@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.security import verify_api_key
 from app.shared.responses import api_error
@@ -11,10 +11,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/binary_tools", tags=["binary_tools"])
 
 class TextToBinaryRequest(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1, max_length=10000)
 
 class BinaryToTextRequest(BaseModel):
-    binary: str
+    # Generous but bounded: ~100000 chars is well beyond any legitimate
+    # use (tens of thousands of words), but still caps the synchronous
+    # per-group validation loop below to a bounded, cheap-to-reject size
+    # (Handbook Part C - Tier 1 endpoints must not do unbounded sync work
+    # inside `async def` handlers on a 2-worker gunicorn config).
+    binary: str = Field(..., min_length=1, max_length=100000)
 
 @router.get("/test", summary="Test Binary Tools endpoint")
 async def test_binary_tools():
@@ -24,9 +29,6 @@ async def test_binary_tools():
 @router.post("/text_to_binary", summary="Convert text to binary")
 async def text_to_binary(request: TextToBinaryRequest, api_key: dict = Depends(verify_api_key)):
     logger.debug("🔧 Converting text to binary: %s", request.text)
-    if not request.text:
-        logger.error("❌ Text is required")
-        raise HTTPException(status_code=400, detail="Text is required")
     try:
         # Encode via UTF-8 bytes (not codepoints via ord()) so every group is
         # exactly 8 bits regardless of script/emoji - ord() overflows the
@@ -41,9 +43,6 @@ async def text_to_binary(request: TextToBinaryRequest, api_key: dict = Depends(v
 @router.post("/binary_to_text", summary="Convert binary to text")
 async def binary_to_text(request: BinaryToTextRequest, api_key: dict = Depends(verify_api_key)):
     logger.debug("🔧 Converting binary to text: %s", request.binary)
-    if not request.binary:
-        logger.error("❌ Binary is required")
-        raise HTTPException(status_code=400, detail="Binary is required")
 
     groups = request.binary.split()
     for group in groups:
