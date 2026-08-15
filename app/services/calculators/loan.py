@@ -8,7 +8,11 @@ def calculate_loan(principal: float, annual_rate: float, years: int) -> dict:
         if principal <= 0 or annual_rate < 0 or years <= 0:
             logger.error("❌ Invalid inputs: principal=%s, annual_rate=%s, years=%s", principal, annual_rate, years)
             raise ValueError("Principal and years must be positive, rate non-negative")
-        
+
+        if annual_rate > 500 or years > 50:
+            logger.error("❌ Out-of-range inputs: annual_rate=%s, years=%s", annual_rate, years)
+            raise ValueError("Annual rate must be between 0 and 500%, and years must be between 1 and 50")
+
         monthly_rate = annual_rate / 100 / 12
         months = years * 12
         if monthly_rate == 0:

@@ -232,6 +232,104 @@ async def test_loan_zero_years_returns_400(client, api_key):
 
 
 # ---------------------------------------------------------------------------
+# Loan: extreme-input overflow fix (api.pdfconverterai.com#49)
+#
+# `calculate_loan()` used to let `(1 + monthly_rate) ** months` blow past
+# Python float range for extreme `annual_rate`/`years` combinations (e.g.
+# 2000%/1000 years), raising an unhandled `OverflowError` that the router's
+# `except Exception` branch turned into an opaque 500
+# ("Failed to calculate loan" with no indication it was a bad-input problem).
+# The fix adds an explicit `annual_rate > 500 or years > 50` bounds check
+# ahead of the exponentiation, raising the same client-safe `ValueError` ->
+# 400 path already covered above for negative/zero inputs. These tests
+# confirm the exact reported overflow case now fails clean (400, not 500),
+# pin down the inclusive boundary the fix intends (500/50 still succeed;
+# one unit past either edge is rejected), and confirm a realistic in-range
+# mortgage calculation is unaffected.
+# ---------------------------------------------------------------------------
+
+async def test_loan_reported_overflow_case_returns_400_not_500(client, api_key):
+    """The exact inputs from the bug report (annual_rate=2000, years=1000)
+    used to overflow `(1 + monthly_rate) ** months` inside
+    `calculate_loan()` and surface as an unhandled 500. Must now be a clean
+    400 with a client-safe message."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 200000, "annual_rate": 2000, "years": 1000},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert "OverflowError" not in resp.text
+    assert (
+        body.get("message")
+        == "Annual rate must be between 0 and 500%, and years must be between 1 and 50"
+    )
+
+
+async def test_loan_annual_rate_and_years_at_the_inclusive_boundary_still_succeed(
+    client, api_key
+):
+    """annual_rate=500 and years=50 are the documented inclusive maximums
+    (the check is `> 500` / `> 50`, not `>= `) - confirms the boundary
+    itself is not accidentally rejected, and that the resulting
+    exponentiation at the very edge still stays within float range."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 1000, "annual_rate": 500, "years": 50},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["monthly_payment"] > 0
+    assert body["monthly_payment"] == pytest.approx(416.67, abs=0.01)
+
+
+async def test_loan_annual_rate_just_over_the_boundary_returns_400(client, api_key):
+    """500.01% - one hundredth of a percent past the inclusive 500% max -
+    must be rejected, confirming the boundary is really `> 500`."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 1000, "annual_rate": 500.01, "years": 50},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+async def test_loan_years_just_over_the_boundary_returns_400(client, api_key):
+    """51 years - one past the inclusive 50-year max - must be rejected,
+    confirming the boundary is really `> 50`."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 1000, "annual_rate": 500, "years": 51},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+async def test_loan_typical_mortgage_returns_a_sane_monthly_payment(client, api_key):
+    """A normal-range, realistic 30-year mortgage (principal=200000,
+    annual_rate=6.5%, years=30) - well clear of the new bounds check -
+    confirms the fix didn't regress the ordinary case, and pins down the
+    actual value (not just "didn't crash") using the standard amortization
+    formula."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 200000, "annual_rate": 6.5, "years": 30},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["monthly_payment"] == 1264.14
+    assert body["total_interest"] == 255088.98
+    # Sanity bounds a regression in either direction would violate: a
+    # monthly payment on a 30-year mortgage should be a small multiple of
+    # principal/months, not near-zero or absurdly large.
+    assert 1000 < body["monthly_payment"] < 2000
+
+
+# ---------------------------------------------------------------------------
 # BMI: zero/negative input validation (real, unmocked path)
 # ---------------------------------------------------------------------------
 
