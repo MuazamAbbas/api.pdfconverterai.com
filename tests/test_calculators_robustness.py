@@ -86,7 +86,19 @@ async def test_age_valid_request_returns_200_with_correct_result(client, api_key
     birth_date = "2000-06-15"
     today = datetime.utcnow()
     birth = datetime.strptime(birth_date, "%Y-%m-%d")
-    expected_age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+
+    years = today.year - birth.year
+    months = today.month - birth.month
+    days = today.day - birth.day
+    if days < 0:
+        months -= 1
+        prev_month = today.month - 1 or 12
+        prev_month_year = today.year if today.month > 1 else today.year - 1
+        import calendar
+        days += calendar.monthrange(prev_month_year, prev_month)[1]
+    if months < 0:
+        years -= 1
+        months += 12
 
     resp = await client.post(
         "/v1/calculators/age",
@@ -95,7 +107,10 @@ async def test_age_valid_request_returns_200_with_correct_result(client, api_key
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["age"] == expected_age
+    assert body["birth_date"] == birth_date
+    assert body["years"] == years
+    assert body["months"] == months
+    assert body["days"] == days
 
 
 async def test_age_generic_exception_returns_500_without_leaking_exception_text(
