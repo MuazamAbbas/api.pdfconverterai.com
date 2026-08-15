@@ -36,7 +36,7 @@ async def calculate_age_endpoint(request: AgeCalculatorRequest, api_key: dict = 
     try:
         age = calculate_age(request.birth_date)
         logger.debug("✅ Age result: %s", age)
-        return {"birth_date": request.birth_date, "age": age}
+        return {"birth_date": request.birth_date, **age}
     except ValueError as e:
         logger.error("❌ Invalid input: %s", str(e))
         raise HTTPException(status_code=400, detail=str(e))
