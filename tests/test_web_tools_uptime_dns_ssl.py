@@ -768,6 +768,29 @@ class _ScriptedRedirectSession:
         return entry
 
 
+class _ScriptedSessionFactory:
+    """Stands in for `aiohttp.ClientSession` itself (the class, not an
+    instance) so endpoint-level tests can drive the *real* `check_url()` -
+    including its real `@retry(...)` decorator - through a scripted fake
+    session instead of real network I/O. `website_down_detector`/
+    `validate_url` both do `async with aiohttp.ClientSession() as session:`,
+    so this needs to be both callable (the `ClientSession()` call) and an
+    async context manager (the `async with`), yielding the pre-built scripted
+    session on `__aenter__`."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
 async def test_check_url_rejects_redirect_to_private_host():
     """The bypass this fixes: a safe, public first hop 302s straight to a
     loopback address. Must be rejected before that hop is ever followed."""
@@ -866,29 +889,51 @@ async def test_check_url_too_many_redirects_raises_cleanly(monkeypatch):
     `stop` down to a single attempt here avoids paying the wall-clock cost of
     3 real exponential-backoff sleeps for what this test needs to assert.
 
-    Note (pre-existing, out of scope for this fix): tenacity's `@retry`
-    without `reraise=True` wraps the final exhausted-attempt exception in
-    `tenacity.RetryError` rather than re-raising it directly - confirmed this
-    already applies identically to the pre-existing 429-exhausted-retries
-    path, not something newly introduced by the redirect-hop handling here.
-    Both `validate_url` and `website_down_detector` already have a generic
-    `except Exception` fallback that turns this into a clean 500 rather than
-    a crash, so callers are not left unhandled either way - just not the
-    nicer `ClientResponseError`-shaped message a caller might expect. Not
-    fixing that pre-existing gap here since it's unrelated to the SSRF
-    findings this change addresses.
+    The decorator now sets `reraise=True` (see
+    `test_check_url_429_exhausted_retries_reraises_original_error` below for
+    the bug this fixes), so the *original* `aiohttp.TooManyRedirects` is
+    raised directly on retry exhaustion, not wrapped in
+    `tenacity.RetryError`.
     """
     monkeypatch.setattr(web_tools_router.check_url.retry, "stop", tenacity.stop_after_attempt(1))
     session = _ScriptedRedirectSession({
         "http://1.1.1.1/": [_FakeResponse(302, location="http://1.1.1.1/") for _ in range(10)],
     })
 
-    with pytest.raises(tenacity.RetryError) as exc_info:
+    with pytest.raises(aiohttp.TooManyRedirects):
         await web_tools_router.check_url(session, "http://1.1.1.1/")
-    assert isinstance(exc_info.value.last_attempt.exception(), aiohttp.TooManyRedirects)
 
     # Bounded: at most _MAX_REDIRECT_HOPS + 1 requests, not attempted forever.
     assert len(session.requested_urls) == web_tools_router._MAX_REDIRECT_HOPS + 1
+
+
+async def test_check_url_429_exhausted_retries_reraises_original_error(monkeypatch):
+    """Regression test for the live-verified 2026-08-20 bug: a target that
+    keeps returning 429 across all 3 retry attempts (e.g. Google's
+    bot-detection serving a repeated "sorry" page) used to have `check_url()`
+    raise `tenacity.RetryError` on retry exhaustion, since the `@retry(...)`
+    decorator had no `reraise=True`. Both `validate_url` and
+    `website_down_detector` only catch `aiohttp.ClientResponseError`, not
+    `tenacity.RetryError`, so it fell through to their generic
+    `except Exception` handlers and returned a raw 500 instead of the
+    intended graceful degraded result.
+
+    `wait` is monkeypatched to `wait_none()` (rather than pinning `stop` down
+    like the redirect-loop test above) so all 3 real attempts still run -
+    exercising genuine retry-exhaustion - without paying the wall-clock cost
+    of real exponential-backoff sleeps.
+    """
+    monkeypatch.setattr(web_tools_router.check_url.retry, "wait", tenacity.wait_none())
+    session = _ScriptedRedirectSession({
+        "http://1.1.1.1/": [_FakeResponse(429) for _ in range(3)],
+    })
+
+    with pytest.raises(aiohttp.ClientResponseError) as exc_info:
+        await web_tools_router.check_url(session, "http://1.1.1.1/")
+    assert exc_info.value.status == 429
+
+    # All 3 attempts were made before giving up.
+    assert len(session.requested_urls) == 3
 
 
 async def test_website_down_detector_redirect_hop_ssrf_is_blocked_cleanly(
@@ -915,6 +960,71 @@ async def test_website_down_detector_redirect_hop_ssrf_is_blocked_cleanly(
     data = body["data"]
     assert data["is_up"] is False
     assert data["error"] == web_tools_router._SSRF_BLOCKED_MESSAGE
+
+
+async def test_website_down_detector_429_exhausted_retries_degrades_gracefully(
+    web_client, api_key, monkeypatch
+):
+    """Regression test for the live-verified 2026-08-20 bug (production
+    traceback: `RetryError[<Future ... raised ClientResponseError>]` while
+    checking `https://www.google.com`, whose bot-detection kept serving 429).
+    Drives the *real* `check_url()` (not monkeypatched away, unlike the other
+    `website_down_detector` tests above) through a scripted session that
+    returns 429 on all 3 retry attempts, so the real `@retry(...)` decorator
+    genuinely exhausts its retries. Before the `reraise=True` fix, this fell
+    through to the generic `except Exception` handler and returned a raw 500;
+    it must instead degrade gracefully via the existing
+    `except aiohttp.ClientResponseError` branch.
+    """
+    monkeypatch.setattr(web_tools_router.check_url.retry, "wait", tenacity.wait_none())
+    fake_session = _ScriptedRedirectSession({
+        "https://example.com": [_FakeResponse(429) for _ in range(3)],
+    })
+    monkeypatch.setattr(
+        web_tools_router.aiohttp, "ClientSession", _ScriptedSessionFactory(fake_session)
+    )
+
+    resp = await web_client.post(
+        "/v1/web_tools/website_down_detector",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data["is_up"] is False
+    assert data["status_code"] == 429
+    assert data["error"] == "The website returned an error response"
+    assert fake_session.requested_urls == ["https://example.com"] * 3
+
+
+async def test_validate_url_429_exhausted_retries_degrades_gracefully(
+    web_client, api_key, monkeypatch
+):
+    """Same regression as `test_website_down_detector_429_exhausted_retries_
+    degrades_gracefully` above, but for `validate_url` - the other of the two
+    callers that share `check_url()` and only catch
+    `aiohttp.ClientResponseError`, not `tenacity.RetryError`."""
+    monkeypatch.setattr(web_tools_router.check_url.retry, "wait", tenacity.wait_none())
+    fake_session = _ScriptedRedirectSession({
+        "https://example.com": [_FakeResponse(429) for _ in range(3)],
+    })
+    monkeypatch.setattr(
+        web_tools_router.aiohttp, "ClientSession", _ScriptedSessionFactory(fake_session)
+    )
+
+    resp = await web_client.post(
+        "/v1/web_tools/validate_url",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["is_valid"] is False
+    assert body["status_code"] == 429
+    assert body["error"] == "The URL returned an error response"
+    assert fake_session.requested_urls == ["https://example.com"] * 3
 
 
 # ===========================================================================
