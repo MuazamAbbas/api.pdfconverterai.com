@@ -32,6 +32,13 @@ DNS_RECORD_TYPES = ("A", "AAAA", "MX", "TXT", "NS", "CNAME")
 
 _SSRF_BLOCKED_MESSAGE = "Cannot check internal or reserved network addresses"
 
+# Redirect hops `check_url()` will follow manually before giving up - matches
+# typical browser/requests defaults, bounded rather than unlimited so a
+# redirect loop degrades to a clean "too many redirects" result instead of
+# spinning forever.
+_MAX_REDIRECT_HOPS = 5
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
 _CONNECT_ERROR_MESSAGES = {
     "timeout": "Connection to the domain timed out",
     "refused": "Connection to the domain was refused",
@@ -62,6 +69,22 @@ class FileIdRequest(BaseModel):
 
 class DomainRequest(BaseModel):
     domain: str
+
+
+def _redact_url_credentials(url: str) -> str:
+    """Strips embedded userinfo (`user:pass@host`) from a URL before it is
+    logged (Handbook Part C.10: logging must never capture credentials/
+    secrets). No-op for URLs that don't carry userinfo, so the common case
+    logs exactly what it did before this change."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return url
+    if not parsed.username and not parsed.password:
+        return url
+    host = parsed.hostname or ""
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return parsed._replace(netloc=netloc).geturl()
 
 
 def _extract_hostname(value: str) -> str | None:
@@ -163,26 +186,66 @@ async def check_url(session: aiohttp.ClientSession, url: str) -> tuple[bool, int
     because both `validate_url` and `website_down_detector` share this one
     function, and there was previously no SSRF protection anywhere on this
     path. Raises `UnsafeHostError`, which is not in `retry_if_exception_type`
-    above, so it propagates immediately instead of being retried."""
+    above, so it propagates immediately instead of being retried.
+
+    Redirects are followed manually (`allow_redirects=False` on the actual
+    request, with an explicit loop below) rather than delegating to aiohttp's
+    own `allow_redirects=True`, specifically so every redirect hop's target
+    host is re-validated against `assert_host_is_safe()` before it's
+    followed - otherwise a plain public URL that 302s to
+    `http://169.254.169.254/...` (or any other internal address) would
+    bypass the guard above entirely, since that guard only ever checked the
+    original hostname. Bounded to `_MAX_REDIRECT_HOPS` hops; exceeding that
+    raises `aiohttp.TooManyRedirects` (a `ClientResponseError` subclass),
+    matching what aiohttp itself would raise for the equivalent
+    `allow_redirects=True` case - callers already handle `ClientResponseError`
+    generically, so no new except clause was needed for this."""
     hostname = urllib.parse.urlparse(url).hostname
     if hostname:
         await assert_host_is_safe(hostname)
-    async with session.get(url, allow_redirects=True, timeout=5) as response:
-        status = response.status
-        if 200 <= status < 400:
-            logger.debug("✅ URL is reachable: %s, status: %d", url, status)
-            return True, status
-        elif status == 429:
-            logger.warning("⚠️ Rate limit hit for URL: %s, status: %d", url, status)
-            raise aiohttp.ClientResponseError(
-                request_info=response.request_info,
-                history=response.history,
-                status=status,
-                message="Too Many Requests"
-            )
-        else:
-            logger.error("❌ URL is not reachable: %s, status: %d", url, status)
-            return False, status
+
+    current_url = url
+    for _hop in range(_MAX_REDIRECT_HOPS + 1):
+        async with session.get(current_url, allow_redirects=False, timeout=5) as response:
+            status = response.status
+            location = response.headers.get("Location")
+            if status in _REDIRECT_STATUSES and location:
+                next_url = urllib.parse.urljoin(current_url, location)
+                next_hostname = urllib.parse.urlparse(next_url).hostname
+                if next_hostname:
+                    # Raises UnsafeHostError on an unsafe redirect target -
+                    # not caught here, propagates to the caller exactly like
+                    # the pre-request check above.
+                    await assert_host_is_safe(next_hostname)
+                logger.debug(
+                    "↪️ Following redirect: %s -> %s, status: %d",
+                    _redact_url_credentials(current_url), _redact_url_credentials(next_url), status
+                )
+                current_url = next_url
+                continue
+            safe_current_url = _redact_url_credentials(current_url)
+            if 200 <= status < 400:
+                logger.debug("✅ URL is reachable: %s, status: %d", safe_current_url, status)
+                return True, status
+            elif status == 429:
+                logger.warning("⚠️ Rate limit hit for URL: %s, status: %d", safe_current_url, status)
+                raise aiohttp.ClientResponseError(
+                    request_info=response.request_info,
+                    history=response.history,
+                    status=status,
+                    message="Too Many Requests"
+                )
+            else:
+                logger.error("❌ URL is not reachable: %s, status: %d", safe_current_url, status)
+                return False, status
+
+    logger.warning("⚠️ Too many redirects for URL: %s", _redact_url_credentials(url))
+    raise aiohttp.TooManyRedirects(
+        request_info=response.request_info,
+        history=response.history,
+        status=response.status,
+        message="Too Many Redirects",
+    )
 
 @router.post("/validate_url", summary="Validate URL and check if it is reachable")
 async def validate_url(request: URLRequest, api_key: dict = Depends(verify_api_key)):
@@ -267,8 +330,8 @@ def _down_detector_result(
 
 @router.post("/website_down_detector", summary="Check whether a website is up or down")
 async def website_down_detector(request: URLRequest, api_key: dict = Depends(verify_api_key)):
-    logger.debug("🔍 Checking website status: %s", request.url)
     raw_url = (request.url or "").strip()
+    logger.debug("🔍 Checking website status: %s", _redact_url_credentials(raw_url))
     if not raw_url:
         logger.warning("❌ Website down detector rejected: URL is required")
         raise api_error(400, "URL is required", "URL_REQUIRED")
@@ -276,7 +339,10 @@ async def website_down_detector(request: URLRequest, api_key: dict = Depends(ver
     url = raw_url if re.match(r"^https?://", raw_url, re.IGNORECASE) else f"https://{raw_url}"
     hostname = urllib.parse.urlparse(url).hostname
     if not hostname:
-        logger.warning("❌ Website down detector rejected: invalid URL format: %s", raw_url)
+        logger.warning(
+            "❌ Website down detector rejected: invalid URL format: %s",
+            _redact_url_credentials(raw_url),
+        )
         raise api_error(400, "Invalid URL format", "URL_INVALID")
 
     checked_at = datetime.now(timezone.utc).isoformat()
@@ -296,21 +362,32 @@ async def website_down_detector(request: URLRequest, api_key: dict = Depends(ver
         return _down_detector_result(raw_url, is_up, status, elapsed_ms, checked_at, error)
     except aiohttp.ClientResponseError as e:
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.info("Website down detector: %s returned an error status", raw_url)
+        logger.info("Website down detector: %s returned an error status", hostname)
         error = "The website returned an error response"
         return _down_detector_result(raw_url, False, e.status, elapsed_ms, checked_at, error)
     except asyncio.TimeoutError:
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.info("Website down detector: %s timed out", raw_url)
+        logger.info("Website down detector: %s timed out", hostname)
         error = "Website did not respond in time"
         return _down_detector_result(raw_url, False, None, elapsed_ms, checked_at, error)
     except aiohttp.ClientError:
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.info("Website down detector: %s is unreachable", raw_url)
+        logger.info("Website down detector: %s is unreachable", hostname)
         error = "Website is unreachable"
         return _down_detector_result(raw_url, False, None, elapsed_ms, checked_at, error)
+    except UnsafeHostError:
+        # A redirect hop inside check_url() targeted a disallowed internal/
+        # private address - same verdict as the pre-request guard above,
+        # just discovered mid-request instead of up front.
+        elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.warning(
+            "🚫 Blocked SSRF attempt for website down detector (redirect hop): %s", hostname
+        )
+        return _down_detector_result(
+            raw_url, False, None, elapsed_ms, checked_at, _SSRF_BLOCKED_MESSAGE
+        )
     except Exception as e:
-        logger.exception("💥 Unexpected error checking website status for %s: %s", raw_url, str(e))
+        logger.exception("💥 Unexpected error checking website status for %s: %s", hostname, str(e))
         raise api_error(500, "Failed to check website status", "WEBSITE_DOWN_DETECTOR_FAILED")
 
 

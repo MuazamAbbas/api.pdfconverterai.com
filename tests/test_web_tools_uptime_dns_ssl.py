@@ -45,7 +45,9 @@ the SSRF guard's own logic, not a stand-in for it.
 import datetime as dt
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
+import tenacity
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -705,3 +707,262 @@ async def test_ssl_checker_blocks_ssrf_targets(web_client, api_key, target):
     assert data["issuer"] is None
     assert data["subject"] is None
     assert data["error"] == "Cannot check internal or reserved network addresses"
+
+
+# ===========================================================================
+# check_url() redirect-target SSRF guard
+#
+# Regression coverage for the redirect-based SSRF bypass: `check_url()`
+# previously validated only the *original* hostname, then let aiohttp
+# (`allow_redirects=True`) follow the entire redirect chain with zero
+# re-validation of any `Location` target. These tests drive `check_url()`
+# directly against a scripted fake `aiohttp.ClientSession` (no real network
+# I/O - same idiom the module docstring above uses for `assert_host_is_safe`:
+# IP-literal hosts resolve to themselves via `socket.getaddrinfo()` with no
+# DNS lookup, so `1.1.1.1`/`9.9.9.9`/`127.0.0.1` are all safe to use as
+# "real" (unmocked) SSRF-guard exercises here too), rather than mocking
+# `check_url` itself away as the endpoint-level tests above do.
+# ===========================================================================
+
+class _FakeResponse:
+    """Mimics just enough of `aiohttp.ClientResponse` for `check_url()`'s
+    manual redirect loop: `.status`, `.headers.get("Location")`, and the
+    attributes `aiohttp.ClientResponseError`/`TooManyRedirects` read off of
+    it (`request_info`, `history`), plus async-context-manager support to
+    match `async with session.get(...) as response:`."""
+
+    def __init__(self, status: int, location: str | None = None):
+        self.status = status
+        self.headers = {"Location": location} if location else {}
+        self.request_info = aiohttp.RequestInfo(
+            url="http://example.invalid", method="GET", headers={}, real_url="http://example.invalid",
+        )
+        self.history = ()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _ScriptedRedirectSession:
+    """Fake `aiohttp.ClientSession` that serves one scripted `_FakeResponse`
+    per URL requested, in order, and records every URL `check_url()` asked
+    for - so tests can assert exactly which hops were (or weren't) followed.
+    """
+
+    def __init__(self, responses_by_url: dict[str, "_FakeResponse | list[_FakeResponse]"]):
+        self._responses = responses_by_url
+        self.requested_urls: list[str] = []
+
+    def get(self, url, allow_redirects=False, timeout=5):
+        assert allow_redirects is False, (
+            "check_url() must disable aiohttp's own redirect-following and walk "
+            "the chain manually so each hop can be SSRF-checked"
+        )
+        self.requested_urls.append(url)
+        entry = self._responses[url]
+        if isinstance(entry, list):
+            return entry.pop(0)
+        return entry
+
+
+async def test_check_url_rejects_redirect_to_private_host():
+    """The bypass this fixes: a safe, public first hop 302s straight to a
+    loopback address. Must be rejected before that hop is ever followed."""
+    session = _ScriptedRedirectSession({
+        "http://1.1.1.1/": _FakeResponse(302, location="http://127.0.0.1/secret"),
+    })
+
+    with pytest.raises(web_tools_router.UnsafeHostError):
+        await web_tools_router.check_url(session, "http://1.1.1.1/")
+
+    # Only the first (safe) hop was actually requested - the unsafe target
+    # was never connected to.
+    assert session.requested_urls == ["http://1.1.1.1/"]
+
+
+async def test_check_url_rejects_redirect_to_metadata_endpoint():
+    """Same bypass, cloud-metadata-endpoint flavor (169.254.169.254) -
+    the concrete example from the finding."""
+    session = _ScriptedRedirectSession({
+        "http://1.1.1.1/": _FakeResponse(
+            302, location="http://169.254.169.254/latest/meta-data/"
+        ),
+    })
+
+    with pytest.raises(web_tools_router.UnsafeHostError):
+        await web_tools_router.check_url(session, "http://1.1.1.1/")
+
+    assert session.requested_urls == ["http://1.1.1.1/"]
+
+
+async def test_check_url_rejects_unsafe_host_on_a_later_hop():
+    """The unsafe redirect doesn't have to be the first hop - a chain that
+    starts and stays safe for a couple of hops before turning unsafe must
+    still be caught."""
+    session = _ScriptedRedirectSession({
+        "http://1.1.1.1/": _FakeResponse(302, location="http://9.9.9.9/step2"),
+        "http://9.9.9.9/step2": _FakeResponse(302, location="http://10.0.0.5/internal"),
+    })
+
+    with pytest.raises(web_tools_router.UnsafeHostError):
+        await web_tools_router.check_url(session, "http://1.1.1.1/")
+
+    assert session.requested_urls == ["http://1.1.1.1/", "http://9.9.9.9/step2"]
+
+
+async def test_check_url_follows_redirect_chain_of_safe_hosts():
+    """Happy path must be unchanged: a redirect chain that stays on safe,
+    public hosts throughout still resolves to the final status."""
+    session = _ScriptedRedirectSession({
+        "http://1.1.1.1/": _FakeResponse(301, location="http://9.9.9.9/final"),
+        "http://9.9.9.9/final": _FakeResponse(200),
+    })
+
+    is_up, status = await web_tools_router.check_url(session, "http://1.1.1.1/")
+
+    assert is_up is True
+    assert status == 200
+    assert session.requested_urls == ["http://1.1.1.1/", "http://9.9.9.9/final"]
+
+
+async def test_check_url_no_redirect_still_works():
+    """A plain, non-redirecting request behaves exactly as before."""
+    session = _ScriptedRedirectSession({"http://1.1.1.1/": _FakeResponse(200)})
+
+    is_up, status = await web_tools_router.check_url(session, "http://1.1.1.1/")
+
+    assert is_up is True
+    assert status == 200
+    assert session.requested_urls == ["http://1.1.1.1/"]
+
+
+async def test_check_url_relative_redirect_location_resolves_against_current_url():
+    """`Location` headers are frequently relative (path-only or protocol-
+    relative), not absolute - `urljoin()` must resolve them against the hop
+    they came from, and the resolved host is what gets SSRF-checked."""
+    session = _ScriptedRedirectSession({
+        "http://1.1.1.1/start": _FakeResponse(302, location="/next"),
+        "http://1.1.1.1/next": _FakeResponse(200),
+    })
+
+    is_up, status = await web_tools_router.check_url(session, "http://1.1.1.1/start")
+
+    assert is_up is True
+    assert status == 200
+    assert session.requested_urls == ["http://1.1.1.1/start", "http://1.1.1.1/next"]
+
+
+async def test_check_url_too_many_redirects_raises_cleanly(monkeypatch):
+    """A redirect loop degrades to a clean, existing-exception-shaped
+    failure - not an unbounded loop or an unhandled crash.
+
+    `check_url()` is wrapped in a `@retry(... retry_if_exception_type
+    (aiohttp.ClientResponseError))` decorator, and `aiohttp.TooManyRedirects`
+    is itself a `ClientResponseError` subclass (matches real aiohttp), so it
+    is retried the same way an exhausted-retries 429 already is. Pinning
+    `stop` down to a single attempt here avoids paying the wall-clock cost of
+    3 real exponential-backoff sleeps for what this test needs to assert.
+
+    Note (pre-existing, out of scope for this fix): tenacity's `@retry`
+    without `reraise=True` wraps the final exhausted-attempt exception in
+    `tenacity.RetryError` rather than re-raising it directly - confirmed this
+    already applies identically to the pre-existing 429-exhausted-retries
+    path, not something newly introduced by the redirect-hop handling here.
+    Both `validate_url` and `website_down_detector` already have a generic
+    `except Exception` fallback that turns this into a clean 500 rather than
+    a crash, so callers are not left unhandled either way - just not the
+    nicer `ClientResponseError`-shaped message a caller might expect. Not
+    fixing that pre-existing gap here since it's unrelated to the SSRF
+    findings this change addresses.
+    """
+    monkeypatch.setattr(web_tools_router.check_url.retry, "stop", tenacity.stop_after_attempt(1))
+    session = _ScriptedRedirectSession({
+        "http://1.1.1.1/": [_FakeResponse(302, location="http://1.1.1.1/") for _ in range(10)],
+    })
+
+    with pytest.raises(tenacity.RetryError) as exc_info:
+        await web_tools_router.check_url(session, "http://1.1.1.1/")
+    assert isinstance(exc_info.value.last_attempt.exception(), aiohttp.TooManyRedirects)
+
+    # Bounded: at most _MAX_REDIRECT_HOPS + 1 requests, not attempted forever.
+    assert len(session.requested_urls) == web_tools_router._MAX_REDIRECT_HOPS + 1
+
+
+async def test_website_down_detector_redirect_hop_ssrf_is_blocked_cleanly(
+    web_client, api_key, monkeypatch
+):
+    """End-to-end shape check at the endpoint level: when `check_url()`
+    raises `UnsafeHostError` because a redirect hop targeted an unsafe host,
+    `website_down_detector` must degrade to the same clean SSRF-blocked
+    result as its own pre-request guard, not a 500 or an unhandled error."""
+
+    async def _fake_check_url(session, url):
+        raise web_tools_router.UnsafeHostError("blocked redirect hop")
+
+    monkeypatch.setattr(web_tools_router, "check_url", _fake_check_url)
+
+    resp = await web_client.post(
+        "/v1/web_tools/website_down_detector",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data["is_up"] is False
+    assert data["error"] == web_tools_router._SSRF_BLOCKED_MESSAGE
+
+
+# ===========================================================================
+# Credential redaction in logs (Finding 3 - website_down_detector/check_url
+# must never log embedded URL userinfo verbatim)
+# ===========================================================================
+
+async def test_redact_url_credentials_strips_userinfo():
+    redacted = web_tools_router._redact_url_credentials(
+        "https://admin:hunter2@internal.example.com/path?x=1"
+    )
+    assert "admin" not in redacted
+    assert "hunter2" not in redacted
+    assert redacted == "https://internal.example.com/path?x=1"
+
+
+async def test_redact_url_credentials_preserves_port_without_userinfo():
+    redacted = web_tools_router._redact_url_credentials(
+        "https://user:pw@example.com:8443/path"
+    )
+    assert "user" not in redacted
+    assert "pw" not in redacted
+    assert redacted == "https://example.com:8443/path"
+
+
+async def test_redact_url_credentials_noop_when_no_credentials():
+    url = "https://example.com/path?x=1"
+    assert web_tools_router._redact_url_credentials(url) == url
+
+
+async def test_website_down_detector_does_not_log_embedded_credentials(
+    web_client, api_key, monkeypatch, caplog
+):
+    async def _fake_check_url(session, url):
+        return True, 200
+
+    monkeypatch.setattr(web_tools_router, "check_url", _fake_check_url)
+
+    with caplog.at_level("DEBUG", logger=web_tools_router.logger.name):
+        resp = await web_client.post(
+            "/v1/web_tools/website_down_detector",
+            json={"url": "https://admin:hunter2@example.com/"},
+            headers={"X-API-Key": api_key["key"]},
+        )
+
+    assert resp.status_code == 200, resp.text
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "hunter2" not in log_text
+    # The response body still echoes the caller's own submitted URL back to
+    # them (not a log, and it's their own credential) - only logs are redacted.
+    assert resp.json()["data"]["url"] == "https://admin:hunter2@example.com/"
