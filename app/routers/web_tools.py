@@ -78,13 +78,18 @@ def _redact_url_credentials(url: str) -> str:
     logs exactly what it did before this change."""
     try:
         parsed = urllib.parse.urlparse(url)
+        if not parsed.username and not parsed.password:
+            return url
+        host = parsed.hostname or ""
+        netloc = f"{host}:{parsed.port}" if parsed.port else host
+        return parsed._replace(netloc=netloc).geturl()
     except ValueError:
+        # Covers both a malformed `urlparse()` call itself and a malformed
+        # port (e.g. `http://user:pass@host:abc/path`) - `.port` is a lazy
+        # property on the parse result that raises ValueError separately
+        # from `urlparse()`, so it must live inside this same try block to
+        # degrade to the same "couldn't parse, return as-is" fallback.
         return url
-    if not parsed.username and not parsed.password:
-        return url
-    host = parsed.hostname or ""
-    netloc = f"{host}:{parsed.port}" if parsed.port else host
-    return parsed._replace(netloc=netloc).geturl()
 
 
 def _extract_hostname(value: str) -> str | None:
@@ -249,7 +254,7 @@ async def check_url(session: aiohttp.ClientSession, url: str) -> tuple[bool, int
 
 @router.post("/validate_url", summary="Validate URL and check if it is reachable")
 async def validate_url(request: URLRequest, api_key: dict = Depends(verify_api_key)):
-    logger.debug("🔍 Validating URL: %s", request.url)
+    logger.debug("🔍 Validating URL: %s", _redact_url_credentials(request.url))
     url_pattern = re.compile(
         r"^(https?://)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(/[\w\-\./?%&=]*)?$",
         re.IGNORECASE
@@ -258,14 +263,16 @@ async def validate_url(request: URLRequest, api_key: dict = Depends(verify_api_k
         logger.error("❌ URL is required")
         raise HTTPException(status_code=400, detail="URL is required")
     if not url_pattern.match(request.url):
-        logger.error("❌ Invalid URL format: %s", request.url)
+        logger.error("❌ Invalid URL format: %s", _redact_url_credentials(request.url))
         raise HTTPException(status_code=400, detail="Invalid URL format")
     try:
         async with aiohttp.ClientSession() as session:
             is_valid, status = await check_url(session, request.url)
             return {"url": request.url, "is_valid": is_valid, "status_code": status}
     except UnsafeHostError:
-        logger.warning("🚫 Blocked SSRF attempt validating URL: %s", request.url)
+        logger.warning(
+            "🚫 Blocked SSRF attempt validating URL: %s", _redact_url_credentials(request.url)
+        )
         return {
             "url": request.url,
             "is_valid": False,

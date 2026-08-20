@@ -945,6 +945,18 @@ async def test_redact_url_credentials_noop_when_no_credentials():
     assert web_tools_router._redact_url_credentials(url) == url
 
 
+async def test_redact_url_credentials_malformed_port_returns_url_unchanged():
+    """A URL with embedded credentials and a non-numeric port (`:abc`)
+    previously raised an unhandled `ValueError` from the lazy `.port`
+    property access on `urlparse()`'s result - a distinct failure mode from,
+    and not caught by, the `except ValueError` that only wrapped the
+    `urlparse()` call itself. Must degrade to the same "couldn't parse,
+    return as-is" fallback the function already has for other unparseable
+    input, not raise."""
+    url = "http://user:pass@host:abc/path"
+    assert web_tools_router._redact_url_credentials(url) == url
+
+
 async def test_website_down_detector_does_not_log_embedded_credentials(
     web_client, api_key, monkeypatch, caplog
 ):
@@ -966,3 +978,48 @@ async def test_website_down_detector_does_not_log_embedded_credentials(
     # The response body still echoes the caller's own submitted URL back to
     # them (not a log, and it's their own credential) - only logs are redacted.
     assert resp.json()["data"]["url"] == "https://admin:hunter2@example.com/"
+
+
+async def test_website_down_detector_malformed_port_does_not_raise(
+    web_client, api_key, monkeypatch
+):
+    """End-to-end check for the same malformed-port hardening:
+    `_redact_url_credentials()` is called unconditionally at the top of
+    `website_down_detector()` before any URL-shape validation, so a
+    credentialed URL with a non-numeric port must degrade to a clean result
+    (whatever `assert_host_is_safe`/`check_url` decide next), not an
+    unhandled 500 from the redaction helper itself."""
+    async def _fake_check_url(session, url):
+        return True, 200
+
+    monkeypatch.setattr(web_tools_router, "check_url", _fake_check_url)
+
+    resp = await web_client.post(
+        "/v1/web_tools/website_down_detector",
+        json={"url": "http://user:pass@example.com:abc/path"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    # Must not be an unhandled 500 from the redaction helper crashing.
+    assert resp.status_code == 200, resp.text
+
+
+async def test_validate_url_does_not_log_embedded_credentials_on_invalid_format(
+    web_client, api_key, caplog
+):
+    """`validate_url()`'s own logging (format-check reject path) previously
+    passed `request.url` straight through unredacted - a credential-bearing
+    URL that fails the format regex (which rejects userinfo in the hostname
+    position) landed unredacted at ERROR level. Mirrors
+    `test_website_down_detector_does_not_log_embedded_credentials` above,
+    but for `validate_url`'s own format-check log line rather than
+    `check_url`'s shared reachability logging."""
+    with caplog.at_level("DEBUG", logger=web_tools_router.logger.name):
+        resp = await web_client.post(
+            "/v1/web_tools/validate_url",
+            json={"url": "https://admin:hunter2@example.com/"},
+            headers={"X-API-Key": api_key["key"]},
+        )
+
+    assert resp.status_code == 400, resp.text
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "hunter2" not in log_text
