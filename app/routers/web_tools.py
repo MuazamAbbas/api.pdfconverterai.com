@@ -182,6 +182,7 @@ async def webpage_summarize(payload: FileIdRequest, request: Request, api_key: d
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     retry=retry_if_exception_type(aiohttp.ClientResponseError),
+    reraise=True,
     before_sleep=lambda retry_state: logger.debug("Retrying URL validation: attempt %d", retry_state.attempt_number)
 )
 async def check_url(session: aiohttp.ClientSession, url: str) -> tuple[bool, int]:
