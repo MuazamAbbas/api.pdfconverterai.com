@@ -24,6 +24,7 @@ from PIL import Image, UnidentifiedImageError
 
 from app.core.storage import STORAGE_PATH
 from app.services.files.service import IMAGE_ALLOWED_EXTENSIONS
+from app.services.image.analysis import MAX_IMAGE_PIXELS
 from app.services.image.ocr import extract_text_from_image
 from app.services.jobs.processor import (
     PermanentProcessingError,
@@ -104,6 +105,11 @@ class ImageCompressProcessor(Processor):
 
         try:
             img = Image.open(path)
+            # Check dimensions before `.load()` decodes the full pixel
+            # buffer - see `analysis.py`'s `MAX_IMAGE_PIXELS` docstring for
+            # why (decompression-bomb finding, security review 2026-08-21).
+            if img.width * img.height > MAX_IMAGE_PIXELS:
+                raise PermanentProcessingError("Image dimensions exceed the maximum allowed size")
             img.load()  # force full decode now - Image.open() alone is lazy
         except (UnidentifiedImageError, OSError) as e:
             # Fixed, hardcoded message rather than `str(e)` - decouples this

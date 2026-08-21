@@ -21,10 +21,25 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PALETTE_COLORS = 6
 
+# ~40 megapixels - comfortably covers real photos (a 25MB upload cap makes
+# anything beyond this implausible as a legitimate image) while blocking a
+# "pixel flood" decompression bomb: a tiny, valid PNG/JPEG can declare huge
+# dimensions that decode to a multi-hundred-MB in-memory buffer and pin a
+# CPU core for seconds once something actually touches pixel data
+# (`.load()`/`.quantize()`/`.save()`). `Image.open()` itself only reads the
+# header and is cheap - checking `img.width * img.height` right after it,
+# before `.load()`, is what actually prevents the decode (confirmed exploit
+# via security-reviewer, 2026-08-21). Pillow's own `MAX_IMAGE_PIXELS`
+# default is a *warning* until 2x that value, not a hard stop, so this
+# module enforces its own cap rather than relying on that.
+MAX_IMAGE_PIXELS = 40_000_000
+
 
 def _open_image(image_data: bytes) -> Image.Image:
     try:
         img = Image.open(io.BytesIO(image_data))
+        if img.width * img.height > MAX_IMAGE_PIXELS:
+            raise ValueError("Image dimensions exceed the maximum allowed size")
         img.load()  # force full decode now - Image.open() alone is lazy
         return img
     except (UnidentifiedImageError, OSError) as e:

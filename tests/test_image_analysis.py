@@ -18,7 +18,7 @@ import io
 import pytest
 from PIL import Image
 
-from app.services.image.analysis import get_color_palette, get_image_info
+from app.services.image.analysis import MAX_IMAGE_PIXELS, get_color_palette, get_image_info
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -128,3 +128,29 @@ async def test_get_color_palette_rejects_corrupt_image():
 
     with pytest.raises(ValueError):
         await get_color_palette(corrupt)
+
+
+def _oversized_png_bytes() -> bytes:
+    """Just over `MAX_IMAGE_PIXELS` - a solid color so it still encodes to a
+    tiny, fast-to-produce PNG despite the huge declared dimensions, mirroring
+    the real-world decompression-bomb shape from the security review finding
+    (2026-08-21): a small file, an enormous pixel count that would otherwise
+    only get caught once something actually decodes/processes the pixels."""
+    width = 7000
+    height = (MAX_IMAGE_PIXELS // width) + 1000  # comfortably over the cap
+    img = Image.new("RGB", (width, height), color=(10, 20, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def test_get_image_info_rejects_oversized_image_before_decoding_pixels():
+    content = _oversized_png_bytes()
+    with pytest.raises(ValueError):
+        await get_image_info(content)
+
+
+async def test_get_color_palette_rejects_oversized_image_before_decoding_pixels():
+    content = _oversized_png_bytes()
+    with pytest.raises(ValueError):
+        await get_color_palette(content)

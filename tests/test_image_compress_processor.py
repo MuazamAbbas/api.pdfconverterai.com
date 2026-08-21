@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+from app.services.image.analysis import MAX_IMAGE_PIXELS
 from app.services.image.processors import ImageCompressProcessor
 from app.services.jobs.processor import PermanentProcessingError, TransientProcessingError
 
@@ -264,6 +265,27 @@ async def test_execute_wraps_getsize_oserror_as_transient(tmp_path, monkeypatch)
     monkeypatch.setattr("app.services.image.processors.os.path.getsize", _boom)
 
     with pytest.raises(TransientProcessingError):
+        await ImageCompressProcessor().run(job=job, file_doc=file_doc)
+
+
+def _write_oversized_png(path: str) -> None:
+    """Just over `MAX_IMAGE_PIXELS` - a solid color so it still encodes
+    quickly despite the huge declared dimensions, mirroring the real-world
+    decompression-bomb shape from the security review finding (2026-08-21):
+    a small file, an enormous pixel count."""
+    width = 7000
+    height = (MAX_IMAGE_PIXELS // width) + 1000  # comfortably over the cap
+    Image.new("RGB", (width, height), color=(10, 20, 30)).save(path, "PNG")
+
+
+async def test_oversized_image_rejected_before_full_decode(tmp_path):
+    """Guards the fix for the confirmed decompression-bomb finding: a huge
+    declared-pixel-count image must be rejected right after `Image.open()`
+    (cheap - header only), before `.load()` decodes the full pixel buffer."""
+    file_doc = _fake_file_doc(tmp_path, "huge.png", writer=_write_oversized_png)
+    job = _fake_job("oversized-job", "medium")
+
+    with pytest.raises(PermanentProcessingError, match="exceed the maximum allowed size"):
         await ImageCompressProcessor().run(job=job, file_doc=file_doc)
 
 
