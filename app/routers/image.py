@@ -19,7 +19,6 @@ disk write + Mongo insert that follow it there, then hand the validated
 bytes to `app/services/image/analysis.py`.
 """
 import logging
-import os
 from typing import Optional
 
 from bson import ObjectId
@@ -32,6 +31,7 @@ from app.services.files.service import (
     UploadValidationError,
     get_file_by_id,
     read_and_validate_upload,
+    sanitize_filename,
     save_uploaded_file,
 )
 from app.services.image.analysis import get_color_palette, get_image_info
@@ -85,9 +85,12 @@ async def _read_uploaded_image(file: UploadFile) -> bytes:
     the upload (extension/size/magic-bytes) via
     `app/services/files/service.py`'s `read_and_validate_upload` without
     writing anything to disk or Mongo, since both callers only need a
-    single-shot in-memory read.
+    single-shot in-memory read. Uses the same `sanitize_filename` allow-list
+    convention `save_uploaded_file` applies, for consistency (code-reviewer
+    note) even though `safe_name` here is only used for the extension check,
+    never to construct a filesystem path.
     """
-    safe_name = os.path.basename(file.filename or "upload")
+    safe_name = sanitize_filename(file.filename)
     return await read_and_validate_upload(file, safe_name, IMAGE_ALLOWED_EXTENSIONS)
 
 

@@ -72,7 +72,7 @@ class UploadValidationError(Exception):
         super().__init__(message)
 
 
-def _sanitize_filename(filename: Optional[str]) -> str:
+def sanitize_filename(filename: Optional[str]) -> str:
     """Strip path components and any character outside a conservative allow-list
     (Handbook Part C.10: sanitized filenames are one of the upload-validation layers).
     """
@@ -138,7 +138,7 @@ async def save_uploaded_file(
     magic-byte validation - callers (routers) turn that into the standard
     error envelope.
     """
-    safe_name = _sanitize_filename(file.filename)
+    safe_name = sanitize_filename(file.filename)
     content = await read_and_validate_upload(file, safe_name, allowed_extensions)
     checksum = hashlib.sha256(content).hexdigest()
 
@@ -190,7 +190,7 @@ async def save_text_input(
             status_code=413,
         )
 
-    safe_name = _sanitize_filename(original_filename)
+    safe_name = sanitize_filename(original_filename)
     checksum = hashlib.sha256(content).hexdigest()
 
     os.makedirs(STORAGE_PATH, exist_ok=True)
@@ -222,7 +222,7 @@ async def save_output_file(
     design decision: output artifacts like a converted .docx get their own
     `files` document rather than being embedded in `jobs.result`).
     """
-    safe_name = _sanitize_filename(original_filename)
+    safe_name = sanitize_filename(original_filename)
     with open(local_path, "rb") as f:
         content = f.read()
     checksum = hashlib.sha256(content).hexdigest()
