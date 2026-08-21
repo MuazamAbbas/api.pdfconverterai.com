@@ -72,7 +72,7 @@ class UploadValidationError(Exception):
         super().__init__(message)
 
 
-def _sanitize_filename(filename: Optional[str]) -> str:
+def sanitize_filename(filename: Optional[str]) -> str:
     """Strip path components and any character outside a conservative allow-list
     (Handbook Part C.10: sanitized filenames are one of the upload-validation layers).
     """
@@ -81,12 +81,19 @@ def _sanitize_filename(filename: Optional[str]) -> str:
     return name[:200]
 
 
-async def _read_and_validate_upload(file: UploadFile, safe_name: str, allowed_extensions: set[str]) -> bytes:
+async def read_and_validate_upload(file: UploadFile, safe_name: str, allowed_extensions: set[str]) -> bytes:
     """Extension-check, size-cap, and magic-byte-sniff an upload.
 
     Reads in chunks and aborts as soon as the configured size cap is
     exceeded, instead of buffering an unbounded/oversized body fully into
     memory first (Handbook Part C.10).
+
+    Public (no leading underscore) so callers that only need a validated,
+    in-memory read - no disk write, no `files` Mongo record - can reuse the
+    same extension/size/magic-byte checks `save_uploaded_file` applies below,
+    instead of re-implementing them (Handbook D.2 "reuse before creating").
+    `app/routers/image.py`'s `/image/file_info` and `/image/color_palette`
+    (Tier 1, single-shot analysis, nothing persisted) are the first callers.
     """
     ext = os.path.splitext(safe_name)[1].lower()
     if ext not in allowed_extensions:
@@ -131,8 +138,8 @@ async def save_uploaded_file(
     magic-byte validation - callers (routers) turn that into the standard
     error envelope.
     """
-    safe_name = _sanitize_filename(file.filename)
-    content = await _read_and_validate_upload(file, safe_name, allowed_extensions)
+    safe_name = sanitize_filename(file.filename)
+    content = await read_and_validate_upload(file, safe_name, allowed_extensions)
     checksum = hashlib.sha256(content).hexdigest()
 
     os.makedirs(STORAGE_PATH, exist_ok=True)
@@ -183,7 +190,7 @@ async def save_text_input(
             status_code=413,
         )
 
-    safe_name = _sanitize_filename(original_filename)
+    safe_name = sanitize_filename(original_filename)
     checksum = hashlib.sha256(content).hexdigest()
 
     os.makedirs(STORAGE_PATH, exist_ok=True)
@@ -215,7 +222,7 @@ async def save_output_file(
     design decision: output artifacts like a converted .docx get their own
     `files` document rather than being embedded in `jobs.result`).
     """
-    safe_name = _sanitize_filename(original_filename)
+    safe_name = sanitize_filename(original_filename)
     with open(local_path, "rb") as f:
         content = f.read()
     checksum = hashlib.sha256(content).hexdigest()
