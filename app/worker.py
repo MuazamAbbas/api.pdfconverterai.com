@@ -265,6 +265,30 @@ async def image_ocr(ctx, job_id: str) -> None:
     await _run_job(ctx, job_id, ImageOcrProcessor, build_result)
 
 
+async def image_compress(ctx, job_id: str) -> None:
+    from app.services.image.processors import ImageCompressProcessor
+
+    async def build_result(job, file_doc, raw_result):
+        base_name = os.path.splitext(file_doc.originalFilename)[0]
+        is_png = os.path.splitext(file_doc.originalFilename)[1].lower() == ".png"
+        output_filename = f"{base_name}-compressed{'.png' if is_png else '.jpg'}"
+        mime_type = "image/png" if is_png else "image/jpeg"
+        output_doc = await save_output_file(
+            local_path=raw_result["output_path"],
+            owner_api_key_id=file_doc.ownerApiKeyId,
+            original_filename=output_filename,
+            mime_type=mime_type,
+        )
+        return {
+            "outputFileId": str(output_doc.id),
+            "originalSize": raw_result["original_size"],
+            "compressedSize": raw_result["compressed_size"],
+            "alreadyOptimal": raw_result["already_optimal"],
+        }
+
+    await _run_job(ctx, job_id, ImageCompressProcessor, build_result)
+
+
 async def text_paraphrase(ctx, job_id: str) -> None:
     from app.services.text.processors import TextParaphraseProcessor
 
@@ -378,6 +402,7 @@ class WorkerSettings:
         pdf_merge,
         pdf_split,
         image_ocr,
+        image_compress,
         text_paraphrase,
         text_summarize,
         web_tools_summarize,

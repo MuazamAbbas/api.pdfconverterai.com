@@ -81,12 +81,19 @@ def _sanitize_filename(filename: Optional[str]) -> str:
     return name[:200]
 
 
-async def _read_and_validate_upload(file: UploadFile, safe_name: str, allowed_extensions: set[str]) -> bytes:
+async def read_and_validate_upload(file: UploadFile, safe_name: str, allowed_extensions: set[str]) -> bytes:
     """Extension-check, size-cap, and magic-byte-sniff an upload.
 
     Reads in chunks and aborts as soon as the configured size cap is
     exceeded, instead of buffering an unbounded/oversized body fully into
     memory first (Handbook Part C.10).
+
+    Public (no leading underscore) so callers that only need a validated,
+    in-memory read - no disk write, no `files` Mongo record - can reuse the
+    same extension/size/magic-byte checks `save_uploaded_file` applies below,
+    instead of re-implementing them (Handbook D.2 "reuse before creating").
+    `app/routers/image.py`'s `/image/file_info` and `/image/color_palette`
+    (Tier 1, single-shot analysis, nothing persisted) are the first callers.
     """
     ext = os.path.splitext(safe_name)[1].lower()
     if ext not in allowed_extensions:
@@ -132,7 +139,7 @@ async def save_uploaded_file(
     error envelope.
     """
     safe_name = _sanitize_filename(file.filename)
-    content = await _read_and_validate_upload(file, safe_name, allowed_extensions)
+    content = await read_and_validate_upload(file, safe_name, allowed_extensions)
     checksum = hashlib.sha256(content).hexdigest()
 
     os.makedirs(STORAGE_PATH, exist_ok=True)
