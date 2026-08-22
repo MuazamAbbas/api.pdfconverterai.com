@@ -307,6 +307,70 @@ async def test_loan_years_just_over_the_boundary_returns_400(client, api_key):
     assert resp.status_code == 400, resp.text
 
 
+# ---------------------------------------------------------------------------
+# Loan: unbounded-principal fix (api.pdfconverterai.com#50)
+#
+# `calculate_loan()` bounded annual_rate/years for #49 but left `principal`
+# unbounded. A principal at or beyond Python's float max (~1.8e308) is
+# parsed as `inf` before it reaches the service, and `inf` serializes to the
+# bare (non-JSON-spec) token `Infinity` - `JSON.parse`/`response.json()` on
+# the frontend throws on that, so a "successful" 200 crashes the UI instead
+# of failing cleanly. The fix adds a `principal > 1_000_000_000_000` bounds
+# check, mirroring the #49 pattern, so this is a clean 400 instead.
+# ---------------------------------------------------------------------------
+
+async def test_loan_reported_infinite_principal_returns_400_not_a_broken_response(
+    client, api_key
+):
+    """A principal past Python's float max (parsed as `inf`) used to sail
+    through as a 200 with `"monthly_payment": Infinity` in the body - not
+    valid JSON, so `response.json()` throws on the frontend. Must now be a
+    clean 400."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 1e309, "annual_rate": 6.5, "years": 30},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "Infinity" not in resp.text
+
+
+async def test_loan_astronomically_large_but_finite_principal_returns_400(
+    client, api_key
+):
+    """Even a merely astronomical (not literally infinite) principal, e.g.
+    a quintillion-dollar loan, is nonsensical for this tool and must be
+    rejected rather than returned as a technically-200 garbage result."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 1e18, "annual_rate": 6.5, "years": 30},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+async def test_loan_principal_at_the_inclusive_boundary_still_succeeds(client, api_key):
+    """principal=1,000,000,000,000 (1 trillion) is the documented inclusive
+    maximum - confirms the boundary itself is not accidentally rejected."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 1_000_000_000_000, "annual_rate": 5, "years": 10},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_loan_principal_just_over_the_boundary_returns_400(client, api_key):
+    """1,000,000,000,001 - one past the inclusive 1-trillion max - must be
+    rejected, confirming the boundary is really `> 1_000_000_000_000`."""
+    resp = await client.post(
+        "/v1/calculators/loan",
+        json={"principal": 1_000_000_000_001, "annual_rate": 5, "years": 10},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 400, resp.text
+
+
 async def test_loan_typical_mortgage_returns_a_sane_monthly_payment(client, api_key):
     """A normal-range, realistic 30-year mortgage (principal=200000,
     annual_rate=6.5%, years=30) - well clear of the new bounds check -
