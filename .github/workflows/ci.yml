@@ -33,6 +33,10 @@ jobs:
     env:
       DATABASE_URL: mongodb://localhost:27017
       REDIS_URL: redis://localhost:6379
+      # app/core/logging.py's setup_logging() opens this path at import time
+      # (via app/worker.py, imported by several test modules). Defaults to a
+      # VPS-only absolute path (app/core/config.py) that doesn't exist here.
+      DOWNLOADERS_LOG_PATH: /tmp/error.log
 
     steps:
       - uses: actions/checkout@v4
