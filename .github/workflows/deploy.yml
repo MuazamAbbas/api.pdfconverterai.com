@@ -21,6 +21,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
+    # git pull + pip install (torch's CPU wheel alone is a large download) +
+    # service restarts + health check normally finish in well under a
+    # minute, but a stuck ssh session or a pip resolve hanging on a bad
+    # index should fail the job instead of burning the default 6h runner cap.
+    timeout-minutes: 15
     steps:
       - name: Configure SSH
         run: |
@@ -82,6 +87,20 @@ jobs:
             set -e
             echo "--- git pull (as pdfconverterai-api) ---"
             sudo -u pdfconverterai-api git -C "$DEPLOY_PATH" pull origin main
+
+            # Keeps the venv's installed packages in sync with requirements.txt
+            # after the pull above - without this, a dependency added/bumped on
+            # main never actually lands on the VPS until someone happens to
+            # pip install by hand, so gunicorn/arq-worker silently keep running
+            # against stale/missing packages after a "successful" deploy.
+            # Mirrors ci.yml's install command (same --extra-index-url, needed
+            # for the CPU-only torch wheel) and runs as pdfconverterai-api,
+            # which owns the venv end-to-end - a root-run pip here would leave
+            # root-owned files in a venv gunicorn/arq-worker run as
+            # pdfconverterai-api, breaking future installs the same way a
+            # root-run git pull would (see the git pull step above).
+            echo "--- pip install -r requirements.txt ---"
+            sudo -u pdfconverterai-api "$DEPLOY_PATH/.venv/bin/pip" install -r "$DEPLOY_PATH/requirements.txt" --extra-index-url https://download.pytorch.org/whl/cpu
 
             echo "--- restart gunicorn.service ---"
             sudo systemctl restart gunicorn.service
