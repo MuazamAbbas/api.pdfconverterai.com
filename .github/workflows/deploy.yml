@@ -1,0 +1,57 @@
+name: Deploy (manual)
+
+# Manual-trigger only, by design - CI (ci.yml) runs automatically on every PR,
+# but an actual VPS deploy stays a deliberate, explicit action (Handbook Part
+# D.1 "founder review + explicit merge decision" workflow). Merging to main
+# does NOT deploy anything by itself; someone has to come here and press
+# "Run workflow".
+on:
+  workflow_dispatch:
+    inputs:
+      restart_worker:
+        description: "Also restart arq-worker.service (needed if worker/job-processing code changed)"
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.VPS_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # BACKEND_DEPLOY_PATH is a repo Variable (Settings > Secrets and
+      # variables > Actions > Variables), not a Secret - it's not sensitive,
+      # just easier to fix if wrong without editing this file. Best-guess
+      # default is /home/pdfconverterai-api/htdocs/api.pdfconverterai.com
+      # (inferred from app/core/config.py's downloaders_log_path /
+      # model_path defaults) - VERIFY this against the real VPS path before
+      # first use.
+      - name: Deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_SSH_HOST }} bash -s <<EOF
+            set -e
+            echo "--- git pull (as pdfconverterai-api) ---"
+            sudo -u pdfconverterai-api git -C "${{ vars.BACKEND_DEPLOY_PATH }}" pull origin main
+
+            echo "--- restart gunicorn.service ---"
+            sudo systemctl restart gunicorn.service
+
+            if [ "${{ inputs.restart_worker }}" = "true" ]; then
+              echo "--- restart arq-worker.service ---"
+              sudo systemctl restart arq-worker.service
+            fi
+
+            sleep 3
+            echo "--- health check ---"
+            curl -fsS https://api.pdfconverterai.com/health
+          EOF
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
