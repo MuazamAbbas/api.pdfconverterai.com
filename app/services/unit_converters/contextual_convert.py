@@ -5,6 +5,10 @@ from nltk.tokenize import word_tokenize
 
 logger = logging.getLogger(__name__)
 nltk.download('punkt', quiet=True)
+# nltk >=3.8.2 split the tokenizer data into 'punkt' (kept for backward
+# compat) and 'punkt_tab' (what word_tokenize/sent_tokenize actually load
+# now) - both are required, or tokenization raises LookupError.
+nltk.download('punkt_tab', quiet=True)
 
 async def contextual_convert(query: str) -> dict:
     """
