@@ -13,6 +13,10 @@ on:
         type: boolean
         default: true
 
+# Workflow never calls the GitHub API - default to no permissions rather than
+# inheriting the broad default GITHUB_TOKEN grant.
+permissions: {}
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -33,16 +37,56 @@ jobs:
       # model_path defaults) - VERIFY this against the real VPS path before
       # first use.
       - name: Deploy
+        # SECURITY: never splice ${{ }} expressions directly into the run:
+        # heredoc below - GitHub substitutes them as raw text BEFORE any
+        # shell parses the script, so a crafted workflow_dispatch input
+        # (attacker-controllable via the REST/CLI dispatch API, regardless
+        # of the `type: boolean` UI hint) can inject arbitrary commands that
+        # execute as root on the VPS. Route both values through env: instead
+        # so they go through normal shell variable substitution.
+        env:
+          RESTART_WORKER: ${{ inputs.restart_worker }}
+          DEPLOY_PATH: ${{ vars.BACKEND_DEPLOY_PATH }}
         run: |
-          ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_SSH_HOST }} bash -s <<EOF
+          set -e
+
+          # Defense in depth: fail fast locally (before anything is sent
+          # over ssh) if either input doesn't look like what it's supposed
+          # to be, rather than trusting the `type: boolean` hint to have
+          # been enforced server-side.
+          if [ "$RESTART_WORKER" != "true" ] && [ "$RESTART_WORKER" != "false" ]; then
+            echo "::error::restart_worker must be 'true' or 'false', got: $RESTART_WORKER" >&2
+            exit 1
+          fi
+          case "$DEPLOY_PATH" in
+            /*) ;;
+            *) echo "::error::BACKEND_DEPLOY_PATH must be an absolute path, got: $DEPLOY_PATH" >&2; exit 1 ;;
+          esac
+
+          # RESTART_WORKER/DEPLOY_PATH only exist in this runner's shell -
+          # the heredoc below is sent as a literal script to a REMOTE shell
+          # over ssh, which has its own, separate environment. printf %q
+          # shell-quotes each value into a single opaque token before it's
+          # embedded in the remote command string, so the remote shell sets
+          # them as real (exported) environment variables for the `bash -s`
+          # it spawns, instead of re-parsing attacker-controlled text as
+          # shell syntax. The heredoc delimiter is quoted ('EOF') so this
+          # runner's shell does NOT expand $RESTART_WORKER/$DEPLOY_PATH
+          # itself - expansion happens remotely, using the remote shell's
+          # own (safely-set) environment variables.
+          REMOTE_RESTART_WORKER=$(printf '%q' "$RESTART_WORKER")
+          REMOTE_DEPLOY_PATH=$(printf '%q' "$DEPLOY_PATH")
+
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.VPS_SSH_HOST }} \
+            "RESTART_WORKER=$REMOTE_RESTART_WORKER DEPLOY_PATH=$REMOTE_DEPLOY_PATH bash -s" <<'EOF'
             set -e
             echo "--- git pull (as pdfconverterai-api) ---"
-            sudo -u pdfconverterai-api git -C "${{ vars.BACKEND_DEPLOY_PATH }}" pull origin main
+            sudo -u pdfconverterai-api git -C "$DEPLOY_PATH" pull origin main
 
             echo "--- restart gunicorn.service ---"
             sudo systemctl restart gunicorn.service
 
-            if [ "${{ inputs.restart_worker }}" = "true" ]; then
+            if [ "$RESTART_WORKER" = "true" ]; then
               echo "--- restart arq-worker.service ---"
               sudo systemctl restart arq-worker.service
             fi
