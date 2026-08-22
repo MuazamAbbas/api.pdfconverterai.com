@@ -54,6 +54,13 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
+      # ruff is a [tool.poetry.group.dev.dependencies] entry in pyproject.toml,
+      # but requirements.txt is generated only from the main dependency group
+      # (see the note at the top of that file) and ruff was never hand-appended
+      # the way pytest/httpx were - so it has to be installed separately here.
+      - name: Install ruff
+        run: pip install "ruff~=0.16.0"
+
       - name: Lint (ruff)
         run: ruff check .
 
