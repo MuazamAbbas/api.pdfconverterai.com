@@ -60,7 +60,10 @@ async def calculate_percentage_endpoint(request: PercentageCalculatorRequest, ap
 
 @router.post("/loan", summary="Calculate loan payment")
 async def calculate_loan_endpoint(request: LoanCalculatorRequest, api_key: dict = Depends(verify_api_key)):
-    logger.debug("🔧 Calculating loan: principal=%s, rate=%s, years=%s", request.principal, request.annual_rate, request.years)
+    logger.debug(
+        "🔧 Calculating loan: principal=%s, rate=%s, years=%s",
+        request.principal, request.annual_rate, request.years,
+    )
     try:
         result = calculate_loan(request.principal, request.annual_rate, request.years)
         logger.debug("✅ Loan result: %s", result)
@@ -87,7 +90,11 @@ async def calculate_bmi_endpoint(request: BMICalculatorRequest, api_key: dict = 
         raise api_error(500, "Failed to calculate BMI", "CALCULATION_FAILED")
 
 @router.post("/financial_plan", summary="Calculate investment with sentiment adjustment")
-async def financial_plan(request: FinancialPlanRequest, app: FastAPI = Depends(get_app), api_key: dict = Depends(verify_api_key)):
+async def financial_plan(
+    request: FinancialPlanRequest,
+    app: FastAPI = Depends(get_app),
+    api_key: dict = Depends(verify_api_key),
+):
     logger.debug("🔧 Calculating financial plan: principal=%s, rate=%s, years=%s, sentiment=%s",
                  request.principal, request.rate, request.years, request.market_sentiment)
     try:

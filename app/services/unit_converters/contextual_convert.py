@@ -44,7 +44,10 @@ async def contextual_convert(query: str) -> dict:
             i += 1
         logger.debug("Parsed: value=%s, from_unit=%s, to_unit=%s", value, from_unit, to_unit)
         if value is None or from_unit is None or to_unit is None:
-            logger.error("Invalid query: %s, parsed: value=%s, from_unit=%s, to_unit=%s", query, value, from_unit, to_unit)
+            logger.error(
+                "Invalid query: %s, parsed: value=%s, from_unit=%s, to_unit=%s",
+                query, value, from_unit, to_unit,
+            )
             raise ValueError("Query must include a value and two units")
         if from_unit not in units or to_unit not in units:
             logger.error("Unsupported units: %s, %s", from_unit, to_unit)

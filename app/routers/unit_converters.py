@@ -3,7 +3,6 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import verify_api_key
-from app.shared.responses import api_error
 from app.models.unit_converters import (
     AngleConvertRequest,
     AreaConvertRequest,
@@ -26,6 +25,7 @@ from app.models.unit_converters import (
     WeightConvertRequest,
 )
 from app.services.unit_converters.contextual_convert import contextual_convert
+from app.shared.responses import api_error
 
 logger = logging.getLogger(__name__)
 

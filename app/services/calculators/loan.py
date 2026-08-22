@@ -19,7 +19,8 @@ def calculate_loan(principal: float, annual_rate: float, years: int) -> dict:
             monthly_payment = principal / months
             total_interest = 0
         else:
-            monthly_payment = principal * (monthly_rate * (1 + monthly_rate)**months) / ((1 + monthly_rate)**months - 1)
+            growth = (1 + monthly_rate) ** months
+            monthly_payment = principal * (monthly_rate * growth) / (growth - 1)
             total_interest = (monthly_payment * months) - principal
         
         logger.debug("✅ Loan calculated: monthly_payment=%s, total_interest=%s", monthly_payment, total_interest)

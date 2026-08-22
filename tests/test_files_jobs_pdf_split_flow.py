@@ -10,8 +10,8 @@ during the test suite).
 import os
 import zipfile
 
-import pytest
 import PyPDF2
+import pytest
 
 import app.worker as worker
 from app.core.storage import STORAGE_PATH

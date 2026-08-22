@@ -29,7 +29,11 @@ from app.services.pdf.processors import PdfSummarizeProcessor
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-def _fake_pdf_file_doc(tmp_path, filename: str, content: bytes = b"%PDF-1.4 fake but present\n%%EOF", write_file: bool = True):
+def _fake_pdf_file_doc(
+    tmp_path, filename: str,
+    content: bytes = b"%PDF-1.4 fake but present\n%%EOF",
+    write_file: bool = True,
+):
     storage_path = str(tmp_path / filename)
     if write_file:
         with open(storage_path, "wb") as f:
