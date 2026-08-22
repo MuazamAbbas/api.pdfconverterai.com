@@ -1,0 +1,16 @@
+# Normalize line endings across all platforms so diffs reflect real content
+# changes only, not CRLF/LF noise from Windows checkouts vs CI (Ubuntu) runners.
+* text=auto eol=lf
+
+# Explicitly mark common binary types so they're never subject to EOL conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
