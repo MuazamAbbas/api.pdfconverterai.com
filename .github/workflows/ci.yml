@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ ping: 1 })' --quiet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: mongodb://localhost:27017
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # OCR tests (app/services/image/ocr.py) shell out to the tesseract
+      # binary via pytesseract - not installed by pip, needs the system package.
+      - name: Install system dependencies (tesseract for OCR)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      # torch==2.7.0+cpu (pinned in requirements.txt to keep CI/deploy light -
+      # no GPU on the VPS) only exists on PyTorch's own CPU wheel index, not
+      # PyPI, hence --extra-index-url. Mirrors the [[tool.poetry.source]]
+      # "pytorch" entry in pyproject.toml.
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Run tests
+        run: pytest
