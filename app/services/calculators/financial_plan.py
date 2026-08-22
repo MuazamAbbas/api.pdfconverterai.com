@@ -33,9 +33,13 @@ class FinancialPlanCalculator:
             # Sentiment adjustment
             sentiment_analyzer = self.app.state.financial_sentiment_pipeline
             sentiment = sentiment_analyzer(market_sentiment)[0]
-            adjustment = 1.05 if sentiment["label"].lower() == "positive" else 0.95 if sentiment["label"].lower() == "negative" else 1.0
+            label = sentiment["label"].lower()
+            adjustment = 1.05 if label == "positive" else 0.95 if label == "negative" else 1.0
             adjusted_amount = amount * adjustment
-            logger.debug("Financial plan calculated: amount=%f, adjusted=%f, sentiment=%s", amount, adjusted_amount, sentiment["label"])
+            logger.debug(
+                "Financial plan calculated: amount=%f, adjusted=%f, sentiment=%s",
+                amount, adjusted_amount, sentiment["label"],
+            )
             return {
                 "investment_value": round(amount, 2),
                 "sentiment_adjusted_value": round(adjusted_amount, 2),

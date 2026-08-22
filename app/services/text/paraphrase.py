@@ -36,7 +36,10 @@ async def paraphrase_text(text: str, pipeline) -> str:
         # Use precise prompt for t5-small
         input_text = f"paraphrase: {text}"
         logger.debug("📡 Sending text to paraphrase pipeline: %s", input_text)
-        logger.debug("Pipeline config: max_length=100, min_length=10, num_beams=4, no_repeat_ngram_size=2, length_penalty=1.0")
+        logger.debug(
+            "Pipeline config: max_length=100, min_length=10, num_beams=4, "
+            "no_repeat_ngram_size=2, length_penalty=1.0"
+        )
         result = pipeline(
             input_text,
             max_length=100,

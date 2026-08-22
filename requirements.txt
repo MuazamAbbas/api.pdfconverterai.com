@@ -338,6 +338,8 @@ tenacity==9.1.4
     # via pdfconverterai-api (pyproject.toml)
 termcolor==3.3.0
     # via fire
+textblob==0.19.0
+    # via pdfconverterai-api (pyproject.toml)
 threadpoolctl==3.6.0
     # via
     #   pdfconverterai-api (pyproject.toml)

@@ -121,7 +121,9 @@ async def url_slug_generator(request: UrlSlugGeneratorRequest, api_key: dict = D
         raise api_error(500, "Failed to generate slug", "SLUG_GENERATION_FAILED")
 
 @router.post("/content_readability_analyzer", summary="Analyze text readability (Flesch scores)")
-async def content_readability_analyzer(request: ContentReadabilityAnalyzerRequest, api_key: dict = Depends(verify_api_key)):
+async def content_readability_analyzer(
+    request: ContentReadabilityAnalyzerRequest, api_key: dict = Depends(verify_api_key)
+):
     logger.debug("🔧 Analyzing readability for text of length: %d", len(request.text))
     try:
         result = await analyze_readability(request.text)
@@ -135,7 +137,9 @@ async def content_readability_analyzer(request: ContentReadabilityAnalyzerReques
         raise api_error(500, "Failed to analyze readability", "READABILITY_ANALYSIS_FAILED")
 
 @router.post("/social_media_tags_generator", summary="Generate Open Graph and Twitter Card meta tags")
-async def social_media_tags_generator(request: SocialMediaTagsGeneratorRequest, api_key: dict = Depends(verify_api_key)):
+async def social_media_tags_generator(
+    request: SocialMediaTagsGeneratorRequest, api_key: dict = Depends(verify_api_key)
+):
     logger.debug("🔧 Generating social media tags for title: %s", request.title)
     try:
         result = await generate_social_media_tags(

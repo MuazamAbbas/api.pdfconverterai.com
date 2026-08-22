@@ -73,6 +73,7 @@ starlette = "^0.46.2"
 sympy = "^1.13.3"
 threadpoolctl = "^3.6.0"
 tenacity = "^9.0.0"
+textblob = "^0.19.0"
 tokenizers = "^0.21.1"
 torch = { version = "2.7.0+cpu", source = "pytorch" }
 tqdm = "^4.66.5"
@@ -103,8 +104,22 @@ httpx = "^0.27.2"
 ruff = "^0.16.0"
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py312"
+# One-off manual exploration/debug scripts at repo root - never part of the
+# pytest suite (that's `tests/`), never meant to be lint-clean.
+extend-exclude = [
+    "create_test_image.py",
+    "test_distilbert.py",
+    "test_nltk.py",
+    "test_ocr.py",
+    "test_sentiment.py",
+    "test_summary.py",
+    "test_t5.py",
+    "test_t5_model.py",
+    "test_t5_small.py",
+    "test_yt_dlp.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

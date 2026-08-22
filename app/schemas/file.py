@@ -24,7 +24,10 @@ class FileBase(BaseModel):
 
     storagePath: str = Field(
         ...,
-        description="Absolute path to the file on local VPS storage (see infra-agent storage layout). Never the file content itself.",
+        description=(
+            "Absolute path to the file on local VPS storage (see infra-agent "
+            "storage layout). Never the file content itself."
+        ),
     )
     checksum: str = Field(
         ..., description="sha256 hex digest of the file contents, for integrity verification"

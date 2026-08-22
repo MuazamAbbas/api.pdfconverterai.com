@@ -31,14 +31,21 @@ from app.core.logging import setup_logging
 
 
 def test_setup_logging_configures_root_via_basic_config_with_file_and_stream_handlers(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     calls = []
     monkeypatch.setattr(
         "app.core.logging.logging.basicConfig",
         lambda **kwargs: calls.append(kwargs),
     )
-    monkeypatch.setattr("app.core.config.settings.downloaders_log_path", r"C:\tmp\error.log")
+    # Use a real, platform-appropriate absolute path (via tmp_path) rather
+    # than a hardcoded Windows-style literal - `C:\tmp\error.log` isn't
+    # recognized as absolute on POSIX, so FileHandler/os.path.abspath()
+    # silently prepends the CWD to it there, breaking the exact-match
+    # assertion below on Linux CI runners even though the underlying
+    # behavior (use whatever path settings gives it) is correct.
+    log_path = str(tmp_path / "error.log")
+    monkeypatch.setattr("app.core.config.settings.downloaders_log_path", log_path)
     monkeypatch.setattr("app.core.config.settings.log_level", "INFO")
 
     setup_logging()
@@ -53,7 +60,7 @@ def test_setup_logging_configures_root_via_basic_config_with_file_and_stream_han
     stream_handlers = [h for h in handlers if type(h) is logging.StreamHandler]
     assert len(file_handlers) == 1, "expected exactly one FileHandler among the configured handlers"
     assert len(stream_handlers) == 1, "expected exactly one plain StreamHandler among the configured handlers"
-    assert file_handlers[0].baseFilename == r"C:\tmp\error.log"
+    assert file_handlers[0].baseFilename == log_path
 
 
 def test_setup_logging_uses_the_configured_log_path_setting(monkeypatch, tmp_path):

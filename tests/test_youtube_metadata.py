@@ -46,8 +46,8 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.routers import video as video_router
 import app.services.video.youtube_metadata as youtube_metadata_service
+from app.routers import video as video_router
 from tests.conftest import _cleanup_api_key, _make_api_key
 
 asyncio_session = pytest.mark.asyncio(loop_scope="session")

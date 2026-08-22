@@ -57,9 +57,9 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import app.services.ai_tools.sentiment as sentiment_service
 from app.routers import ai_tools as ai_tools_router
 from app.routers import text as text_router
-import app.services.ai_tools.sentiment as sentiment_service
 from tests.conftest import _cleanup_api_key, _make_api_key
 
 # Applied per-async-test (not as a blanket module-level `pytestmark`) since

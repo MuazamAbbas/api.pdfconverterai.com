@@ -24,7 +24,6 @@ name inside that module to a subclass whose `utcnow()` returns a fixed value
 layer, since the router calls the same function object against the same
 module globals).
 """
-import calendar
 from datetime import datetime as real_datetime
 
 import pytest
