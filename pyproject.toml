@@ -73,6 +73,7 @@ starlette = "^0.46.2"
 sympy = "^1.13.3"
 threadpoolctl = "^3.6.0"
 tenacity = "^9.0.0"
+textblob = "^0.19.0"
 tokenizers = "^0.21.1"
 torch = { version = "2.7.0+cpu", source = "pytorch" }
 tqdm = "^4.66.5"
