@@ -6,3 +6,12 @@ class URLEncodeRequest(BaseModel):
 
 class WebpageSummarizeRequest(BaseModel):
     url: str
+
+class WhoisLookupRequest(BaseModel):
+    domain: str
+
+class IPLookupRequest(BaseModel):
+    ip: str
+
+class SpeedTestRequest(BaseModel):
+    url: str
