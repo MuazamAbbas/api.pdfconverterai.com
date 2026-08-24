@@ -17,15 +17,17 @@ from bson import ObjectId
 from cryptography import x509
 from fastapi import APIRouter, Depends, HTTPException, Request
 from ipwhois import IPWhois
-from ipwhois.exceptions import IPDefinedError
+from ipwhois.exceptions import BaseIpwhoisException, IPDefinedError
 from pydantic import BaseModel
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from whois.parser import WhoisEntry
+from whois.whois import NICClient
 
 from app.core.security import verify_api_key
 from app.models.web_tools import IPLookupRequest, SpeedTestRequest, URLEncodeRequest, WhoisLookupRequest
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
 from app.services.jobs.service import create_job, mark_failed, mark_queued
-from app.shared.network_security import UnsafeHostError, assert_host_is_safe
+from app.shared.network_security import UnsafeHostError, assert_host_is_safe, assert_host_is_safe_sync
 from app.shared.responses import api_error, envelope
 
 logger = logging.getLogger(__name__)
@@ -710,6 +712,63 @@ def _empty_whois_result(domain: str, error: str) -> dict:
     })
 
 
+class _SafeWhoisSocket(socket.socket):
+    """A `socket.socket` whose `connect()` is SSRF-guarded (Handbook Part
+    C.10) before it's allowed to actually connect - see `_SafeNICClient`
+    below for why this exists and exactly what it closes."""
+
+    def connect(self, address):
+        host = address[0] if isinstance(address, tuple) else address
+        assert_host_is_safe_sync(host)
+        return super().connect(address)
+
+
+class _SafeNICClient(NICClient):
+    """`whois.whois.NICClient`, except every socket it opens is a
+    `_SafeWhoisSocket` - closes a real SSRF gap: `whois.whois()` never
+    just connects to the caller-supplied domain's own address (already
+    covered by this router's `assert_host_is_safe(domain)` pre-check). It
+    also connects to a TLD-mapped whois host chosen internally by the
+    library, and then - by default, since the recursion flag is on unless
+    `WHOIS_QUICK` is passed - regex-extracts a `"Whois Server: <host>"`
+    value straight out of that first response's text and opens a second,
+    completely unvalidated `socket.connect((nhost, 43))` to it (see
+    `NICClient.whois()` / `findwhois_server()` in
+    `.venv/Lib/site-packages/whois/whois.py`). Both hops go through
+    `get_socket()` -> `.connect()`, so overriding at that one boundary
+    closes the gap for both, without needing to reimplement or hook into
+    the library's recursion/parsing logic itself.
+
+    Does not support the library's optional SOCKS-proxy mode (`SOCKS` env
+    var, see the parent class's own `get_socket()`) - this backend never
+    sets it, and silently falling back to an unguarded plain socket for
+    that path would defeat the point of this override, so it's dropped
+    rather than preserved.
+    """
+
+    def get_socket(self):
+        return _SafeWhoisSocket(socket.AF_INET, socket.SOCK_STREAM)
+
+
+def _safe_whois_lookup(domain: str, flags: int = 0, timeout: int = 10):
+    """Equivalent to `whois.whois()`'s own default code path (builtin
+    socket client - the SOCKS and native-`whois`-command paths are not
+    used by this endpoint), except driven through `_SafeNICClient` instead
+    of the library's own unguarded `NICClient` (see above), so this is
+    what `whois_lookup()` below calls instead of `whois.whois()` directly.
+    `flags=0` is the library's own default and leaves recursive WHOIS
+    lookups enabled - registrar-level data (for gTLDs that split registry/
+    registrar WHOIS) is preserved, unlike disabling recursion via
+    `WHOIS_QUICK` would trade away.
+    """
+    nic_client = _SafeNICClient()
+    idna_domain = domain.encode("idna").decode("utf-8")
+    text = nic_client.whois_lookup(None, idna_domain, flags, timeout=timeout)
+    if not text:
+        raise whois.exceptions.WhoisError("Whois command returned no output")
+    return WhoisEntry.load(idna_domain, text)
+
+
 @router.post("/whois_lookup", summary="Look up WHOIS registration data for a domain")
 async def whois_lookup(request: WhoisLookupRequest, api_key: dict = Depends(verify_api_key)):
     logger.debug("🔍 Looking up WHOIS data for: %s", request.domain)
@@ -725,7 +784,7 @@ async def whois_lookup(request: WhoisLookupRequest, api_key: dict = Depends(veri
         return _empty_whois_result(domain, _SSRF_BLOCKED_MESSAGE)
 
     try:
-        result = await asyncio.to_thread(whois.whois, domain)
+        result = await asyncio.to_thread(_safe_whois_lookup, domain)
     except (whois.exceptions.PywhoisError, UnicodeError):
         # PywhoisError covers "no WHOIS server for this TLD", "domain not
         # registered" on registries that respond with an explicit not-found
@@ -736,6 +795,15 @@ async def whois_lookup(request: WhoisLookupRequest, api_key: dict = Depends(veri
         # malformed label) - both are "no data for this input", not a bug.
         logger.info("WHOIS lookup: no data found for %s", domain)
         return _empty_whois_result(domain, "No WHOIS data found for this domain")
+    except UnsafeHostError:
+        # The registrar-referral hop `_safe_whois_lookup()` followed
+        # pointed at a disallowed internal/private address - same verdict
+        # as the pre-lookup guard above, just discovered mid-lookup by
+        # `_SafeWhoisSocket` instead of up front.
+        logger.warning(
+            "🚫 Blocked SSRF attempt for WHOIS lookup (referral host): %s", domain
+        )
+        return _empty_whois_result(domain, _SSRF_BLOCKED_MESSAGE)
     except Exception as e:
         logger.exception("💥 Unexpected error during WHOIS lookup for %s: %s", domain, str(e))
         raise api_error(500, "Failed to perform WHOIS lookup", "WHOIS_LOOKUP_FAILED")
@@ -753,7 +821,12 @@ async def whois_lookup(request: WhoisLookupRequest, api_key: dict = Depends(veri
     # `None` instead of raising - the same "no data" outcome as the
     # exception path above (e.g. an unregistered domain on a WHOIS server
     # that still answers with an empty record), just a different shape.
-    if not any([registrar, creation_date, expiration_date, name_servers]):
+    # `registrant_org` is included here too (despite the GDPR-redaction
+    # rationale above meaning its *absence* never counts against "has
+    # data") so that the rare record with only `registrant_org` populated
+    # is correctly treated as real, if sparse, data - not silently
+    # discarded in favor of the canned empty result.
+    if not any([registrar, creation_date, expiration_date, name_servers, registrant_org]):
         logger.info("WHOIS lookup: empty record for %s", domain)
         return _empty_whois_result(domain, "No WHOIS data found for this domain")
 
@@ -815,6 +888,19 @@ def _extract_abuse_contact(objects: dict | None) -> str | None:
     return None
 
 
+# `IPWhois.lookup_rdap()`'s own defaults (`retry_count=3`,
+# `rate_limit_timeout=120`) can block a thread-pool worker for minutes on a
+# rate-limited RIR RDAP server - `get_http_json()` sleeps up to
+# `rate_limit_timeout` seconds before each retry (see
+# `.venv/Lib/site-packages/ipwhois/net.py`). Tightened here so a single
+# retry/rate-limit cycle is bounded to a few seconds, with
+# `_IP_LOOKUP_TOTAL_TIMEOUT` below as a hard backstop in case the library's
+# own bounds don't behave as expected.
+_IP_LOOKUP_RETRY_COUNT = 1
+_IP_LOOKUP_RATE_LIMIT_TIMEOUT = 3
+_IP_LOOKUP_TOTAL_TIMEOUT = 12
+
+
 @router.post("/ip_lookup", summary="Look up ownership/ASN information for an IP address")
 async def ip_lookup(request: IPLookupRequest, api_key: dict = Depends(verify_api_key)):
     raw_ip = (request.ip or "").strip()
@@ -839,10 +925,39 @@ async def ip_lookup(request: IPLookupRequest, api_key: dict = Depends(verify_api
         return _empty_ip_lookup_result(raw_ip, _SSRF_BLOCKED_MESSAGE)
 
     try:
-        result = await asyncio.to_thread(lambda: IPWhois(raw_ip).lookup_rdap())
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: IPWhois(raw_ip).lookup_rdap(
+                    retry_count=_IP_LOOKUP_RETRY_COUNT,
+                    rate_limit_timeout=_IP_LOOKUP_RATE_LIMIT_TIMEOUT,
+                )
+            ),
+            timeout=_IP_LOOKUP_TOTAL_TIMEOUT,
+        )
     except IPDefinedError:
         logger.info("IP lookup: no ownership data for reserved address %s", raw_ip)
         return _empty_ip_lookup_result(raw_ip, "No ownership data available for this address")
+    except asyncio.TimeoutError:
+        # Backstop only - `asyncio.to_thread()`'s worker thread can't
+        # actually be force-killed once `wait_for()` gives up on it, so a
+        # rare worst-case call may keep running in the background after
+        # this returns. Acceptable: it's bounded (loosely) by the tight
+        # retry/rate-limit settings above already, this is just insurance
+        # against the library not honoring them as expected.
+        logger.info("IP lookup: RDAP lookup timed out for %s", raw_ip)
+        return _empty_ip_lookup_result(raw_ip, "IP lookup timed out, please try again later")
+    except BaseIpwhoisException as e:
+        # Covers the RDAP/ASN network-failure exceptions `ipwhois` itself
+        # raises (rate-limited, HTTP lookup failed, ASN registry/whois
+        # lookup failed, etc.) - a transient lookup failure is a
+        # legitimate check *result* here, the same reasoning
+        # `check_url()`/`ssl_checker()` elsewhere in this file already
+        # apply to their own connection-level failures, not an internal
+        # error worth a 500.
+        logger.info("IP lookup: RDAP lookup failed for %s: %s", raw_ip, str(e))
+        return _empty_ip_lookup_result(
+            raw_ip, "Unable to complete IP lookup right now, please try again later"
+        )
     except Exception as e:
         logger.exception("💥 Unexpected error during IP lookup for %s: %s", raw_ip, str(e))
         raise api_error(500, "Failed to look up IP address", "IP_LOOKUP_FAILED")
@@ -865,7 +980,7 @@ async def ip_lookup(request: IPLookupRequest, api_key: dict = Depends(verify_api
 # Website Speed Test
 # ---------------------------------------------------------------------------
 
-_SPEED_TEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+_SPEED_TEST_TIMEOUT = aiohttp.ClientTimeout(total=5)
 _TOO_MANY_REDIRECTS_MESSAGE = "Too many redirects"
 
 
@@ -906,6 +1021,15 @@ def _build_speed_trace_config(timings: dict) -> aiohttp.TraceConfig:
     not an approximation via first-body-chunk timing (which would also
     fold in any gap the server has between sending headers and starting
     the body).
+
+    `on_request_start` fires before DNS resolution/connection-establishment
+    for that request even begin, so `ttfb_ms` as captured here is
+    INCLUSIVE of `dns_time_ms` + `connect_time_ms`, not an isolated
+    "waiting after connect" phase - the same inclusive definition common
+    PageSpeed-style tools use for "time to first byte" (full
+    request-to-first-byte wall clock, not connection-established-to-first-
+    byte). `dns_time_ms`/`connect_time_ms` overlapping with `ttfb_ms` in
+    the response is therefore intentional, not double-counting to "fix".
     """
     trace_config = aiohttp.TraceConfig()
 

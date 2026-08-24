@@ -20,7 +20,9 @@ Mocking convention
 -------------------
 Monkeypatches the router module's own call sites rather than reaching into
 library internals - no real outbound network calls anywhere in this file:
-  - `web_tools_router.whois.whois` for WHOIS lookups.
+  - `web_tools_router._safe_whois_lookup` for WHOIS lookups (a local
+    wrapper the router calls instead of `whois.whois()` directly - see
+    `_SafeNICClient`'s docstring in `web_tools.py` for why).
   - `web_tools_router.IPWhois` (the class itself, bound directly into the
     router's namespace via `from ipwhois import IPWhois`) for IP lookups.
   - `web_tools_router.aiohttp.ClientSession` for the speed test - `speed_test()`
@@ -35,16 +37,25 @@ library internals - no real outbound network calls anywhere in this file:
 The SSRF-target addresses are exercised through the *real*, unmocked
 `assert_host_is_safe()` - `socket.getaddrinfo()` resolves an IP-literal to
 itself with no network I/O, so this is a real (not simulated) exercise of
-the SSRF guard's own logic, matching the existing file's convention.
+the SSRF guard's own logic, matching the existing file's convention. The one
+exception is `test_whois_lookup_referral_to_unsafe_host_is_blocked` below,
+which deliberately reaches deeper - into `web_tools_router._SafeWhoisSocket`
+specifically (this fix's own new socket subclass, not a shared/global one -
+see that test's own docstring for why patching the *global* `socket.socket`
+class instead broke the test run entirely) - to exercise the real WHOIS
+referral/recursion flow and the real `assert_host_is_safe_sync()` guard
+end-to-end.
 """
+import time
 from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
 import whois
-from ipwhois.exceptions import IPDefinedError
+from ipwhois.exceptions import HTTPLookupError, IPDefinedError
 
 import app.routers.web_tools as web_tools_router
+from app.shared.network_security import assert_host_is_safe_sync
 from tests.test_web_tools_uptime_dns_ssl import _build_web_tools_only_app
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -92,7 +103,7 @@ async def test_whois_lookup_happy_path(web_client, api_key, monkeypatch):
             "org": "Example Org",
         }
 
-    monkeypatch.setattr(web_tools_router.whois, "whois", _fake_whois)
+    monkeypatch.setattr(web_tools_router, "_safe_whois_lookup", _fake_whois)
 
     resp = await web_client.post(
         "/v1/web_tools/whois_lookup",
@@ -132,7 +143,7 @@ async def test_whois_lookup_tolerates_full_url_and_list_creation_date(
             "org": None,
         }
 
-    monkeypatch.setattr(web_tools_router.whois, "whois", _fake_whois)
+    monkeypatch.setattr(web_tools_router, "_safe_whois_lookup", _fake_whois)
 
     resp = await web_client.post(
         "/v1/web_tools/whois_lookup",
@@ -156,7 +167,7 @@ async def test_whois_lookup_pywhois_error_is_clean_no_data_not_a_crash(
     def _fake_whois(domain):
         raise whois.exceptions.PywhoisError("No match for domain.")
 
-    monkeypatch.setattr(web_tools_router.whois, "whois", _fake_whois)
+    monkeypatch.setattr(web_tools_router, "_safe_whois_lookup", _fake_whois)
 
     resp = await web_client.post(
         "/v1/web_tools/whois_lookup",
@@ -189,7 +200,7 @@ async def test_whois_lookup_empty_record_is_clean_no_data_not_a_crash(
             "org": None,
         }
 
-    monkeypatch.setattr(web_tools_router.whois, "whois", _fake_whois)
+    monkeypatch.setattr(web_tools_router, "_safe_whois_lookup", _fake_whois)
 
     resp = await web_client.post(
         "/v1/web_tools/whois_lookup",
@@ -220,7 +231,7 @@ async def test_whois_lookup_generic_exception_returns_500_without_leak(
     def _boom(domain):
         raise RuntimeError("SECRET_MARKER_whois db_password=hunter2 at web_tools.py")
 
-    monkeypatch.setattr(web_tools_router.whois, "whois", _boom)
+    monkeypatch.setattr(web_tools_router, "_safe_whois_lookup", _boom)
 
     resp = await web_client.post(
         "/v1/web_tools/whois_lookup",
@@ -238,11 +249,12 @@ async def test_whois_lookup_generic_exception_returns_500_without_leak(
 
 @pytest.mark.parametrize("target", SSRF_TARGETS)
 async def test_whois_lookup_blocks_ssrf_targets(web_client, api_key, monkeypatch, target):
-    # `whois.whois` must never even be called once the SSRF guard rejects.
+    # `_safe_whois_lookup` must never even be called once the pre-lookup
+    # SSRF guard rejects the domain itself.
     def _fail_if_called(domain):
-        raise AssertionError("whois.whois() must not be called for an unsafe host")
+        raise AssertionError("_safe_whois_lookup() must not be called for an unsafe host")
 
-    monkeypatch.setattr(web_tools_router.whois, "whois", _fail_if_called)
+    monkeypatch.setattr(web_tools_router, "_safe_whois_lookup", _fail_if_called)
 
     domain = f"[{target}]" if ":" in target else target
     resp = await web_client.post(
@@ -258,30 +270,178 @@ async def test_whois_lookup_blocks_ssrf_targets(web_client, api_key, monkeypatch
     assert data["error"] == "Cannot check internal or reserved network addresses"
 
 
+async def test_whois_lookup_registrant_org_only_is_not_classified_as_no_data(
+    web_client, api_key, monkeypatch
+):
+    """Regression test for the `registrant_org`-only classification gap:
+    `registrant_org` is deliberately excluded from the "has data" check
+    (GDPR-redaction rationale - its *absence* shouldn't disqualify a
+    record that has everything else), but that must not mean a record
+    where it's the *only* populated field gets silently discarded as "no
+    WHOIS data found"."""
+    def _fake_whois(domain):
+        return {
+            "registrar": None,
+            "creation_date": None,
+            "expiration_date": None,
+            "name_servers": None,
+            "org": "Some Registrant Org",
+        }
+
+    monkeypatch.setattr(web_tools_router, "_safe_whois_lookup", _fake_whois)
+
+    resp = await web_client.post(
+        "/v1/web_tools/whois_lookup",
+        json={"domain": "example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["registrant_org"] == "Some Registrant Org"
+    assert data["error"] is None
+
+
+async def test_whois_lookup_referral_to_unsafe_host_is_blocked(
+    web_client, api_key, monkeypatch
+):
+    """Regression test for the WHOIS referral SSRF gap (finding #1):
+    `whois.whois()` never actually connects to the caller-supplied
+    domain's own address - it connects to a TLD-mapped whois host chosen
+    internally by the library, then (by default) regex-extracts a
+    "Whois Server: <host>" value straight out of that response and opens a
+    second, raw `socket.connect((nhost, 43))` to it with no validation at
+    all (see `NICClient.whois()` / `findwhois_server()` in
+    `.venv/Lib/site-packages/whois/whois.py`). The pre-lookup
+    `assert_host_is_safe(domain)` check in `whois_lookup()` never sees
+    this second hop, since it only ever validates the original domain.
+
+    This can't be exercised by mocking `_safe_whois_lookup` itself (that
+    would just prove the mock returns what it's told to, not that the real
+    guard fires) or by hitting a real WHOIS server (no real outbound
+    network calls in this test file). Instead, the transport is scripted
+    to simulate two hops without any actual network I/O, while the real
+    `NICClient` recursion (`findwhois_server()`'s regex-extraction of the
+    referral host, the recursive `self.whois()` call) and the real
+    `assert_host_is_safe_sync()` guard both run unmocked for both hops.
+
+    Scoped to `web_tools_router._SafeWhoisSocket` specifically - NOT the
+    base `socket.socket` class - deliberately: an earlier version of this
+    test patched `socket.socket.connect/send/recv` globally and caused the
+    whole test (and sometimes the whole run) to hang. Root cause: on this
+    platform `asyncio`'s event loop wakes worker threads' completions
+    (`asyncio.to_thread()`, used by the endpoint under test) via an
+    internal loopback "self-pipe" socket, and a process-wide monkeypatch
+    of `socket.socket.send`/`recv` intercepts that self-pipe's own traffic
+    right along with the WHOIS socket's - the loop's wakeup notification
+    silently vanishes into the fake instead of the real self-pipe, and the
+    `await` never resolves. `_SafeWhoisSocket` is a distinct subclass used
+    only by this WHOIS code path, so patching it directly reaches none of
+    that shared machinery. `connect()` itself is faked here (rather than
+    left to actually call the real `assert_host_is_safe_sync()` +
+    `super().connect()` and only faking the transport underneath) for the
+    same reason - it still calls the real, unmocked `assert_host_is_safe_sync()`
+    guard function itself, just without going through `super().connect()`
+    into the shared base-socket layer at all.
+    """
+    first_hop_host = "8.8.8.8"  # a real, public, safe IP literal.
+    referral_host = "127.0.0.1"
+    first_hop_response = (
+        f"Domain Name: EXAMPLE.COM\r\nWhois Server: {referral_host}\r\n"
+    ).encode()
+
+    connected_hosts: list[str] = []
+
+    def _fake_connect(self, address):
+        host = address[0] if isinstance(address, tuple) else address
+        # The real guard, unmocked - this is what's actually being tested.
+        assert_host_is_safe_sync(host)
+        connected_hosts.append(host)
+        self._fake_connected_host = host
+        return None
+
+    def _fake_send(self, data):
+        return len(data)
+
+    def _fake_recv(self, bufsize):
+        # NICClient.whois()'s `while True: recv(...)` loop stops once
+        # `recv()` returns empty bytes - one scripted chunk, then EOF.
+        if getattr(self, "_fake_recv_done", False):
+            return b""
+        self._fake_recv_done = True
+        if getattr(self, "_fake_connected_host", None) == first_hop_host:
+            return first_hop_response
+        return b""
+
+    monkeypatch.setattr(web_tools_router._SafeWhoisSocket, "connect", _fake_connect)
+    monkeypatch.setattr(web_tools_router._SafeWhoisSocket, "send", _fake_send)
+    monkeypatch.setattr(web_tools_router._SafeWhoisSocket, "recv", _fake_recv)
+    monkeypatch.setattr(
+        web_tools_router._SafeNICClient, "choose_server", lambda self, domain: first_hop_host
+    )
+
+    resp = await web_client.post(
+        "/v1/web_tools/whois_lookup",
+        json={"domain": "example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data["error"] == "Cannot check internal or reserved network addresses"
+    # The real fix: the referral host was never actually connected to -
+    # `assert_host_is_safe_sync()` raised for it before it was ever
+    # appended to `connected_hosts`.
+    assert connected_hosts == [first_hop_host]
+
+
 # ===========================================================================
 # /web_tools/ip_lookup
 # ===========================================================================
 
 class _FakeIPWhois:
     """Stands in for `ipwhois.IPWhois` - the endpoint does
-    `IPWhois(raw_ip).lookup_rdap()`, so this needs a matching constructor
-    signature and a `lookup_rdap()` method."""
+    `IPWhois(raw_ip).lookup_rdap(retry_count=..., rate_limit_timeout=...)`,
+    so this needs a matching constructor signature and a `lookup_rdap()`
+    method that accepts (and can optionally record) those kwargs."""
 
     _rdap_result: dict | None = None
     _raise: Exception | None = None
+    _sleep_seconds: float = 0.0
+    _received_kwargs_sink: list | None = None
 
     def __init__(self, ip):
         self.ip = ip
 
-    def lookup_rdap(self):
+    def lookup_rdap(self, **kwargs):
+        if self._received_kwargs_sink is not None:
+            self._received_kwargs_sink.append(kwargs)
+        if self._sleep_seconds:
+            # Blocking sleep - runs inside `asyncio.to_thread()` on a real
+            # worker thread in production, so this is a faithful stand-in
+            # for "the library call itself blocks for a while", used to
+            # exercise the `asyncio.wait_for()` backstop (finding #2).
+            time.sleep(self._sleep_seconds)
         if self._raise is not None:
             raise self._raise
         return self._rdap_result
 
 
-def _make_fake_ipwhois_class(rdap_result: dict | None = None, raise_exc: Exception | None = None):
+def _make_fake_ipwhois_class(
+    rdap_result: dict | None = None,
+    raise_exc: Exception | None = None,
+    sleep_seconds: float = 0.0,
+    received_kwargs_sink: list | None = None,
+):
     return type(
-        "_FakeIPWhois", (_FakeIPWhois,), {"_rdap_result": rdap_result, "_raise": raise_exc}
+        "_FakeIPWhois",
+        (_FakeIPWhois,),
+        {
+            "_rdap_result": rdap_result,
+            "_raise": raise_exc,
+            "_sleep_seconds": sleep_seconds,
+            "_received_kwargs_sink": received_kwargs_sink,
+        },
     )
 
 
@@ -361,6 +521,94 @@ async def test_ip_lookup_defined_error_is_clean_no_data_not_a_crash(
     data = body["data"]
     assert data["asn"] is None
     assert data["error"] == "No ownership data available for this address"
+
+
+async def test_ip_lookup_uses_tight_retry_and_rate_limit_bounds(web_client, api_key, monkeypatch):
+    """Regression test for finding #2: `lookup_rdap()` must be called with
+    tight, explicit `retry_count`/`rate_limit_timeout` bounds, not the
+    library's own defaults (`retry_count=3`, `rate_limit_timeout=120`) -
+    on a rate-limited RIR RDAP server those defaults can block a
+    thread-pool worker for minutes (`get_http_json()` sleeps up to
+    `rate_limit_timeout` seconds before each retry)."""
+    received: list[dict] = []
+    fake_result = {
+        "asn": "15169", "asn_description": None, "asn_country_code": None,
+        "network": {}, "objects": None,
+    }
+    monkeypatch.setattr(
+        web_tools_router,
+        "IPWhois",
+        _make_fake_ipwhois_class(rdap_result=fake_result, received_kwargs_sink=received),
+    )
+
+    resp = await web_client.post(
+        "/v1/web_tools/ip_lookup",
+        json={"ip": "8.8.8.8"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(received) == 1
+    assert received[0]["retry_count"] == web_tools_router._IP_LOOKUP_RETRY_COUNT
+    assert received[0]["rate_limit_timeout"] == web_tools_router._IP_LOOKUP_RATE_LIMIT_TIMEOUT
+    # The whole point: meaningfully tighter than the library's own defaults.
+    assert web_tools_router._IP_LOOKUP_RETRY_COUNT < 3
+    assert web_tools_router._IP_LOOKUP_RATE_LIMIT_TIMEOUT < 120
+
+
+async def test_ip_lookup_hard_timeout_backstop_degrades_cleanly(web_client, api_key, monkeypatch):
+    """Regression test for finding #2's `asyncio.wait_for()` hard backstop:
+    even if the underlying call somehow blocks past the tight retry/
+    rate-limit bounds above, the endpoint must still return a clean
+    degrade instead of hanging the request indefinitely."""
+    monkeypatch.setattr(web_tools_router, "_IP_LOOKUP_TOTAL_TIMEOUT", 0.05)
+    monkeypatch.setattr(
+        web_tools_router,
+        "IPWhois",
+        _make_fake_ipwhois_class(rdap_result={"asn": "1"}, sleep_seconds=0.5),
+    )
+
+    resp = await web_client.post(
+        "/v1/web_tools/ip_lookup",
+        json={"ip": "8.8.8.8"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["asn"] is None
+    assert data["error"] == "IP lookup timed out, please try again later"
+
+
+async def test_ip_lookup_rdap_network_failure_is_clean_degrade_not_a_crash(
+    web_client, api_key, monkeypatch
+):
+    """Regression test for finding #3: a transient RDAP/ASN network failure
+    (rate limit exhausted, HTTP lookup failed, etc. - the exception types
+    `ipwhois` itself raises, under `ipwhois.exceptions.BaseIpwhoisException`)
+    must degrade cleanly like `IPDefinedError` already does above, not
+    surface as a scary 500 - matching how `check_url()`/`ssl_checker()`
+    elsewhere in this file treat their own connection-level failures as
+    legitimate check results, not internal errors."""
+    monkeypatch.setattr(
+        web_tools_router,
+        "IPWhois",
+        _make_fake_ipwhois_class(
+            raise_exc=HTTPLookupError(
+                "HTTP lookup failed for https://rdap.example/ip/8.8.8.8."
+            )
+        ),
+    )
+
+    resp = await web_client.post(
+        "/v1/web_tools/ip_lookup",
+        json={"ip": "8.8.8.8"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data["asn"] is None
+    assert data["error"] == "Unable to complete IP lookup right now, please try again later"
 
 
 async def test_ip_lookup_missing_ip_is_400(web_client, api_key):

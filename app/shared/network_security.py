@@ -71,3 +71,30 @@ async def assert_host_is_safe(hostname: str, timeout: float = 5.0) -> None:
         ip_str = sockaddr[0] if sockaddr else None
         if ip_str and _is_unsafe_ip(ip_str):
             raise UnsafeHostError(f"Host resolves to a disallowed network address: {hostname}")
+
+
+def assert_host_is_safe_sync(hostname: str) -> None:
+    """Synchronous twin of `assert_host_is_safe()`, for guarding a connect
+    that happens deep inside a third-party library running on a blocking
+    worker thread (`asyncio.to_thread()`) with no running event loop to
+    `await` against - e.g. `web_tools.py`'s WHOIS referral-host guard,
+    which has to intercept a raw `socket.connect()` call made from inside
+    `python-whois`'s own code. Same private/loopback/link-local/reserved/
+    multicast check as the async version, via a direct (blocking)
+    `socket.getaddrinfo()` call instead of routing through an executor.
+    Same "no-op on resolution failure, that's not an SSRF verdict" contract
+    as the async version too.
+    """
+    if not hostname:
+        return
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, UnicodeError):
+        return
+
+    for info in infos:
+        sockaddr = info[4]
+        ip_str = sockaddr[0] if sockaddr else None
+        if ip_str and _is_unsafe_ip(ip_str):
+            raise UnsafeHostError(f"Host resolves to a disallowed network address: {hostname}")
