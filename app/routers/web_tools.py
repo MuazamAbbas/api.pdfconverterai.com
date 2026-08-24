@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import logging
 import re
 import socket
@@ -11,17 +12,22 @@ import aiohttp
 import dns.asyncresolver
 import dns.exception
 import dns.resolver
+import whois
 from bson import ObjectId
 from cryptography import x509
 from fastapi import APIRouter, Depends, HTTPException, Request
+from ipwhois import IPWhois
+from ipwhois.exceptions import BaseIpwhoisException, IPDefinedError
 from pydantic import BaseModel
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from whois.parser import WhoisEntry
+from whois.whois import NICClient
 
 from app.core.security import verify_api_key
-from app.models.web_tools import URLEncodeRequest
+from app.models.web_tools import IPLookupRequest, SpeedTestRequest, URLEncodeRequest, WhoisLookupRequest
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
 from app.services.jobs.service import create_job, mark_failed, mark_queued
-from app.shared.network_security import UnsafeHostError, assert_host_is_safe
+from app.shared.network_security import UnsafeHostError, assert_host_is_safe, assert_host_is_safe_sync
 from app.shared.responses import api_error, envelope
 
 logger = logging.getLogger(__name__)
@@ -641,3 +647,504 @@ async def ssl_checker(request: DomainRequest, api_key: dict = Depends(verify_api
         "is_self_signed": is_self_signed,
         "error": error_message,
     })
+
+
+# ---------------------------------------------------------------------------
+# WHOIS Lookup
+#
+# Free-tier replacement for v1's paid-`WHOISXML_API_KEY`-backed tool
+# (Handbook CLAUDE.md deferred-key list) - uses `python-whois`'s raw port-43
+# socket lookup instead, per founder decision to close this v1-parity item
+# without the deferred key. No geolocation/paid-data dependency at all.
+# ---------------------------------------------------------------------------
+
+def _normalize_whois_date(value) -> str | None:
+    """`python-whois` returns a single `datetime`, a list of `datetime`s
+    (some registries repeat a date field across multiple matched lines), or
+    occasionally a plain string it couldn't cast to a date at all -
+    normalize all three shapes to one ISO-8601 string (or the raw string if
+    it was never parsed). For a list, the earliest value is used - this
+    only ever fires for `creation_date` in practice (the field the "avoid
+    duplicates" dedup in the library's own parser most often still leaves
+    as a multi-entry list), and "earliest" matches "first registered"
+    semantics; `expiration_date` degrades the same way for consistency even
+    though a list is not observed for it in practice.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        candidates = [v for v in value if v is not None]
+        if not candidates:
+            return None
+        if all(isinstance(v, datetime) for v in candidates):
+            return min(candidates).isoformat()
+        return str(candidates[0])
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _normalize_whois_name_servers(value) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    seen: set[str] = set()
+    result: list[str] = []
+    for entry in values:
+        if not entry:
+            continue
+        lowered = str(entry).strip().lower().rstrip(".")
+        if lowered and lowered not in seen:
+            seen.add(lowered)
+            result.append(lowered)
+    return result
+
+
+def _empty_whois_result(domain: str, error: str) -> dict:
+    return envelope(True, "WHOIS lookup completed", data={
+        "domain": domain,
+        "registrar": None,
+        "creation_date": None,
+        "expiration_date": None,
+        "name_servers": [],
+        "registrant_org": None,
+        "error": error,
+    })
+
+
+class _SafeWhoisSocket(socket.socket):
+    """A `socket.socket` whose `connect()` is SSRF-guarded (Handbook Part
+    C.10) before it's allowed to actually connect - see `_SafeNICClient`
+    below for why this exists and exactly what it closes."""
+
+    def connect(self, address):
+        host = address[0] if isinstance(address, tuple) else address
+        assert_host_is_safe_sync(host)
+        return super().connect(address)
+
+
+class _SafeNICClient(NICClient):
+    """`whois.whois.NICClient`, except every socket it opens is a
+    `_SafeWhoisSocket` - closes a real SSRF gap: `whois.whois()` never
+    just connects to the caller-supplied domain's own address (already
+    covered by this router's `assert_host_is_safe(domain)` pre-check). It
+    also connects to a TLD-mapped whois host chosen internally by the
+    library, and then - by default, since the recursion flag is on unless
+    `WHOIS_QUICK` is passed - regex-extracts a `"Whois Server: <host>"`
+    value straight out of that first response's text and opens a second,
+    completely unvalidated `socket.connect((nhost, 43))` to it (see
+    `NICClient.whois()` / `findwhois_server()` in
+    `.venv/Lib/site-packages/whois/whois.py`). Both hops go through
+    `get_socket()` -> `.connect()`, so overriding at that one boundary
+    closes the gap for both, without needing to reimplement or hook into
+    the library's recursion/parsing logic itself.
+
+    Does not support the library's optional SOCKS-proxy mode (`SOCKS` env
+    var, see the parent class's own `get_socket()`) - this backend never
+    sets it, and silently falling back to an unguarded plain socket for
+    that path would defeat the point of this override, so it's dropped
+    rather than preserved.
+    """
+
+    def get_socket(self):
+        return _SafeWhoisSocket(socket.AF_INET, socket.SOCK_STREAM)
+
+
+def _safe_whois_lookup(domain: str, flags: int = 0, timeout: int = 10):
+    """Equivalent to `whois.whois()`'s own default code path (builtin
+    socket client - the SOCKS and native-`whois`-command paths are not
+    used by this endpoint), except driven through `_SafeNICClient` instead
+    of the library's own unguarded `NICClient` (see above), so this is
+    what `whois_lookup()` below calls instead of `whois.whois()` directly.
+    `flags=0` is the library's own default and leaves recursive WHOIS
+    lookups enabled - registrar-level data (for gTLDs that split registry/
+    registrar WHOIS) is preserved, unlike disabling recursion via
+    `WHOIS_QUICK` would trade away.
+    """
+    nic_client = _SafeNICClient()
+    idna_domain = domain.encode("idna").decode("utf-8")
+    text = nic_client.whois_lookup(None, idna_domain, flags, timeout=timeout)
+    if not text:
+        raise whois.exceptions.WhoisError("Whois command returned no output")
+    return WhoisEntry.load(idna_domain, text)
+
+
+@router.post("/whois_lookup", summary="Look up WHOIS registration data for a domain")
+async def whois_lookup(request: WhoisLookupRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔍 Looking up WHOIS data for: %s", request.domain)
+    domain = _extract_hostname(request.domain)
+    if not domain:
+        logger.warning("❌ WHOIS lookup rejected: domain is required")
+        raise api_error(400, "Domain is required", "DOMAIN_REQUIRED")
+
+    try:
+        await assert_host_is_safe(domain)
+    except UnsafeHostError:
+        logger.warning("🚫 Blocked SSRF attempt for WHOIS lookup: %s", domain)
+        return _empty_whois_result(domain, _SSRF_BLOCKED_MESSAGE)
+
+    try:
+        result = await asyncio.to_thread(_safe_whois_lookup, domain)
+    except (whois.exceptions.PywhoisError, UnicodeError):
+        # PywhoisError covers "no WHOIS server for this TLD", "domain not
+        # registered" on registries that respond with an explicit not-found
+        # message, and the library's own internal socket-error/empty-output
+        # fallback (`ignore_socket_errors=True` by default, so most raw
+        # connection failures surface as this rather than a raw OSError).
+        # UnicodeError covers a hostname that fails IDNA encoding (e.g. a
+        # malformed label) - both are "no data for this input", not a bug.
+        logger.info("WHOIS lookup: no data found for %s", domain)
+        return _empty_whois_result(domain, "No WHOIS data found for this domain")
+    except UnsafeHostError:
+        # The registrar-referral hop `_safe_whois_lookup()` followed
+        # pointed at a disallowed internal/private address - same verdict
+        # as the pre-lookup guard above, just discovered mid-lookup by
+        # `_SafeWhoisSocket` instead of up front.
+        logger.warning(
+            "🚫 Blocked SSRF attempt for WHOIS lookup (referral host): %s", domain
+        )
+        return _empty_whois_result(domain, _SSRF_BLOCKED_MESSAGE)
+    except Exception as e:
+        logger.exception("💥 Unexpected error during WHOIS lookup for %s: %s", domain, str(e))
+        raise api_error(500, "Failed to perform WHOIS lookup", "WHOIS_LOOKUP_FAILED")
+
+    registrar = result.get("registrar")
+    creation_date = _normalize_whois_date(result.get("creation_date"))
+    expiration_date = _normalize_whois_date(result.get("expiration_date"))
+    name_servers = _normalize_whois_name_servers(result.get("name_servers"))
+    # `org` is the registrant organization field - commonly `None`/redacted
+    # for gTLDs post-2018 ICANN GDPR privacy policy. That is an expected,
+    # legitimate result, not folded into the "no data at all" check below.
+    registrant_org = result.get("org")
+
+    # Some TLDs/registries return a parsed object with every other field
+    # `None` instead of raising - the same "no data" outcome as the
+    # exception path above (e.g. an unregistered domain on a WHOIS server
+    # that still answers with an empty record), just a different shape.
+    # `registrant_org` is included here too (despite the GDPR-redaction
+    # rationale above meaning its *absence* never counts against "has
+    # data") so that the rare record with only `registrant_org` populated
+    # is correctly treated as real, if sparse, data - not silently
+    # discarded in favor of the canned empty result.
+    if not any([registrar, creation_date, expiration_date, name_servers, registrant_org]):
+        logger.info("WHOIS lookup: empty record for %s", domain)
+        return _empty_whois_result(domain, "No WHOIS data found for this domain")
+
+    logger.info("WHOIS lookup completed for domain: %s", domain)
+    return envelope(True, "WHOIS lookup completed", data={
+        "domain": domain,
+        "registrar": registrar,
+        "creation_date": creation_date,
+        "expiration_date": expiration_date,
+        "name_servers": name_servers,
+        "registrant_org": registrant_org,
+        "error": None,
+    })
+
+
+# ---------------------------------------------------------------------------
+# IP Address Lookup
+#
+# Scope note: this deliberately returns ONLY ownership/ASN information
+# (via free RDAP lookups through `ipwhois`), never geolocation (city/
+# lat-long/timezone). v1's paid-`GOOGLE_API_KEY`-backed version returned
+# geolocation too - this free-tier replacement does not, by founder
+# decision, not as a limitation discovered after the fact.
+# ---------------------------------------------------------------------------
+
+def _empty_ip_lookup_result(ip: str, error: str) -> dict:
+    return envelope(True, "IP lookup completed", data={
+        "ip": ip,
+        "asn": None,
+        "asn_description": None,
+        "network_name": None,
+        "network_cidr": None,
+        "country": None,
+        "abuse_contact": None,
+        "error": error,
+    })
+
+
+def _extract_abuse_contact(objects: dict | None) -> str | None:
+    """RDAP entity shapes vary a lot by RIR - `objects` is a handle -> entity
+    dict, each entity optionally carrying a `roles` list and a `contact`
+    dict whose `email` is itself a list of `{type, value}` dicts (see
+    `ipwhois.rdap._RDAPContact._parse_email`). Returns the first email found
+    on the first entity with an `abuse` role, or `None` if any level of that
+    shape is missing - absence is a normal, expected result for many
+    networks, not an error."""
+    if not objects:
+        return None
+    for entity in objects.values():
+        roles = entity.get("roles") or []
+        if "abuse" not in roles:
+            continue
+        contact = entity.get("contact") or {}
+        emails = contact.get("email") or []
+        for email in emails:
+            value = email.get("value") if isinstance(email, dict) else email
+            if value:
+                return value
+    return None
+
+
+# `IPWhois.lookup_rdap()`'s own defaults (`retry_count=3`,
+# `rate_limit_timeout=120`) can block a thread-pool worker for minutes on a
+# rate-limited RIR RDAP server - `get_http_json()` sleeps up to
+# `rate_limit_timeout` seconds before each retry (see
+# `.venv/Lib/site-packages/ipwhois/net.py`). Tightened here so a single
+# retry/rate-limit cycle is bounded to a few seconds, with
+# `_IP_LOOKUP_TOTAL_TIMEOUT` below as a hard backstop in case the library's
+# own bounds don't behave as expected.
+_IP_LOOKUP_RETRY_COUNT = 1
+_IP_LOOKUP_RATE_LIMIT_TIMEOUT = 3
+_IP_LOOKUP_TOTAL_TIMEOUT = 12
+
+
+@router.post("/ip_lookup", summary="Look up ownership/ASN information for an IP address")
+async def ip_lookup(request: IPLookupRequest, api_key: dict = Depends(verify_api_key)):
+    raw_ip = (request.ip or "").strip()
+    logger.debug("🔍 Looking up IP address: %s", raw_ip)
+    if not raw_ip:
+        logger.warning("❌ IP lookup rejected: IP is required")
+        raise api_error(400, "IP address is required", "IP_REQUIRED")
+
+    try:
+        ipaddress.ip_address(raw_ip)
+    except ValueError:
+        logger.warning("❌ IP lookup rejected: invalid IP address: %s", raw_ip)
+        raise api_error(400, "A valid IP address is required", "IP_INVALID")
+
+    try:
+        # `assert_host_is_safe` resolves via `getaddrinfo()`, which resolves
+        # an IP literal to itself - the same private/loopback/reserved
+        # check as a DNS-mediated SSRF attempt applies directly here.
+        await assert_host_is_safe(raw_ip)
+    except UnsafeHostError:
+        logger.warning("🚫 Blocked SSRF attempt for IP lookup: %s", raw_ip)
+        return _empty_ip_lookup_result(raw_ip, _SSRF_BLOCKED_MESSAGE)
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: IPWhois(raw_ip).lookup_rdap(
+                    retry_count=_IP_LOOKUP_RETRY_COUNT,
+                    rate_limit_timeout=_IP_LOOKUP_RATE_LIMIT_TIMEOUT,
+                )
+            ),
+            timeout=_IP_LOOKUP_TOTAL_TIMEOUT,
+        )
+    except IPDefinedError:
+        logger.info("IP lookup: no ownership data for reserved address %s", raw_ip)
+        return _empty_ip_lookup_result(raw_ip, "No ownership data available for this address")
+    except asyncio.TimeoutError:
+        # Backstop only - `asyncio.to_thread()`'s worker thread can't
+        # actually be force-killed once `wait_for()` gives up on it, so a
+        # rare worst-case call may keep running in the background after
+        # this returns. Acceptable: it's bounded (loosely) by the tight
+        # retry/rate-limit settings above already, this is just insurance
+        # against the library not honoring them as expected.
+        logger.info("IP lookup: RDAP lookup timed out for %s", raw_ip)
+        return _empty_ip_lookup_result(raw_ip, "IP lookup timed out, please try again later")
+    except BaseIpwhoisException as e:
+        # Covers the RDAP/ASN network-failure exceptions `ipwhois` itself
+        # raises (rate-limited, HTTP lookup failed, ASN registry/whois
+        # lookup failed, etc.) - a transient lookup failure is a
+        # legitimate check *result* here, the same reasoning
+        # `check_url()`/`ssl_checker()` elsewhere in this file already
+        # apply to their own connection-level failures, not an internal
+        # error worth a 500.
+        logger.info("IP lookup: RDAP lookup failed for %s: %s", raw_ip, str(e))
+        return _empty_ip_lookup_result(
+            raw_ip, "Unable to complete IP lookup right now, please try again later"
+        )
+    except Exception as e:
+        logger.exception("💥 Unexpected error during IP lookup for %s: %s", raw_ip, str(e))
+        raise api_error(500, "Failed to look up IP address", "IP_LOOKUP_FAILED")
+
+    network = result.get("network") or {}
+    logger.info("IP lookup completed for: %s", raw_ip)
+    return envelope(True, "IP lookup completed", data={
+        "ip": raw_ip,
+        "asn": result.get("asn"),
+        "asn_description": result.get("asn_description"),
+        "network_name": network.get("name"),
+        "network_cidr": network.get("cidr"),
+        "country": result.get("asn_country_code"),
+        "abuse_contact": _extract_abuse_contact(result.get("objects")),
+        "error": None,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Website Speed Test
+# ---------------------------------------------------------------------------
+
+_SPEED_TEST_TIMEOUT = aiohttp.ClientTimeout(total=5)
+_TOO_MANY_REDIRECTS_MESSAGE = "Too many redirects"
+
+
+def _empty_speed_test_result(url: str, error: str) -> dict:
+    return envelope(True, "Speed test completed", data={
+        "url": url,
+        "dns_time_ms": None,
+        "connect_time_ms": None,
+        "ttfb_ms": None,
+        "total_time_ms": None,
+        "status_code": None,
+        "content_size_bytes": None,
+        "error": error,
+    })
+
+
+def _build_speed_trace_config(timings: dict) -> aiohttp.TraceConfig:
+    """Registers `aiohttp` trace hooks to capture per-phase timings into the
+    caller-owned `timings` dict (each hook writes a key on completion; the
+    dict is `.clear()`-ed by the caller at the start of every redirect hop,
+    so only the *final* hop's phase timings survive to the response -
+    `total_time_ms`, tracked separately by the caller around the whole
+    redirect loop, still reflects the full multi-hop duration).
+
+    DNS (`on_dns_resolvehost_*`) and connection-create
+    (`on_connection_create_*`) hooks bracket resolution/socket-connect time
+    directly - each hook pair receives the same per-request
+    `trace_config_ctx` object, used here as scratch space for the "start"
+    timestamp.
+
+    TTFB is captured via `on_request_start`/`on_request_end` rather than
+    `on_response_chunk_received`'s first call: reading `aiohttp`'s own
+    `ClientSession._request()` (in `client.py`) shows `on_request_end` fires
+    immediately after `resp.start(conn)` - the call that reads the status
+    line and headers - and *before* the response body is read (body reading
+    is the caller's job, done separately via `resp.read()` below). That
+    makes `on_request_end` a direct, accurate "headers received" marker,
+    not an approximation via first-body-chunk timing (which would also
+    fold in any gap the server has between sending headers and starting
+    the body).
+
+    `on_request_start` fires before DNS resolution/connection-establishment
+    for that request even begin, so `ttfb_ms` as captured here is
+    INCLUSIVE of `dns_time_ms` + `connect_time_ms`, not an isolated
+    "waiting after connect" phase - the same inclusive definition common
+    PageSpeed-style tools use for "time to first byte" (full
+    request-to-first-byte wall clock, not connection-established-to-first-
+    byte). `dns_time_ms`/`connect_time_ms` overlapping with `ttfb_ms` in
+    the response is therefore intentional, not double-counting to "fix".
+    """
+    trace_config = aiohttp.TraceConfig()
+
+    async def on_dns_start(session, ctx, params):
+        ctx.dns_start = time.monotonic()
+
+    async def on_dns_end(session, ctx, params):
+        if hasattr(ctx, "dns_start"):
+            timings["dns_time_ms"] = round((time.monotonic() - ctx.dns_start) * 1000, 2)
+
+    async def on_connect_start(session, ctx, params):
+        ctx.connect_start = time.monotonic()
+
+    async def on_connect_end(session, ctx, params):
+        if hasattr(ctx, "connect_start"):
+            timings["connect_time_ms"] = round((time.monotonic() - ctx.connect_start) * 1000, 2)
+
+    async def on_req_start(session, ctx, params):
+        ctx.req_start = time.monotonic()
+
+    async def on_req_end(session, ctx, params):
+        if hasattr(ctx, "req_start"):
+            timings["ttfb_ms"] = round((time.monotonic() - ctx.req_start) * 1000, 2)
+
+    trace_config.on_dns_resolvehost_start.append(on_dns_start)
+    trace_config.on_dns_resolvehost_end.append(on_dns_end)
+    trace_config.on_connection_create_start.append(on_connect_start)
+    trace_config.on_connection_create_end.append(on_connect_end)
+    trace_config.on_request_start.append(on_req_start)
+    trace_config.on_request_end.append(on_req_end)
+    return trace_config
+
+
+@router.post("/speed_test", summary="Run a website load-speed test")
+async def speed_test(request: SpeedTestRequest, api_key: dict = Depends(verify_api_key)):
+    raw_url = (request.url or "").strip()
+    logger.debug("🔍 Running speed test for: %s", _redact_url_credentials(raw_url))
+    if not raw_url:
+        logger.warning("❌ Speed test rejected: URL is required")
+        raise api_error(400, "URL is required", "URL_REQUIRED")
+
+    url = raw_url if re.match(r"^https?://", raw_url, re.IGNORECASE) else f"https://{raw_url}"
+    hostname = urllib.parse.urlparse(url).hostname
+    if not hostname:
+        logger.warning("❌ Speed test rejected: invalid URL format: %s", _redact_url_credentials(raw_url))
+        raise api_error(400, "Invalid URL format", "URL_INVALID")
+
+    try:
+        await assert_host_is_safe(hostname)
+    except UnsafeHostError:
+        logger.warning("🚫 Blocked SSRF attempt for speed test: %s", hostname)
+        return _empty_speed_test_result(raw_url, _SSRF_BLOCKED_MESSAGE)
+
+    timings: dict = {}
+    trace_config = _build_speed_trace_config(timings)
+    total_start = time.monotonic()
+
+    try:
+        async with aiohttp.ClientSession(
+            trace_configs=[trace_config], timeout=_SPEED_TEST_TIMEOUT
+        ) as session:
+            current_url = url
+            for _hop in range(_MAX_REDIRECT_HOPS + 1):
+                timings.clear()
+                async with session.get(current_url, allow_redirects=False) as response:
+                    location = response.headers.get("Location")
+                    if response.status in _REDIRECT_STATUSES and location:
+                        next_url = urllib.parse.urljoin(current_url, location)
+                        next_hostname = urllib.parse.urlparse(next_url).hostname
+                        if next_hostname:
+                            # Re-validated per hop for the same reason
+                            # `check_url()` does it - a public URL that
+                            # redirects to an internal address must not
+                            # bypass the pre-request guard above.
+                            await assert_host_is_safe(next_hostname)
+                        logger.debug(
+                            "↪️ Speed test following redirect: %s -> %s",
+                            _redact_url_credentials(current_url), _redact_url_credentials(next_url),
+                        )
+                        current_url = next_url
+                        continue
+
+                    body = await response.read()
+                    total_ms = round((time.monotonic() - total_start) * 1000, 2)
+                    logger.info("Speed test completed for %s: status=%d", hostname, response.status)
+                    return envelope(True, "Speed test completed", data={
+                        "url": raw_url,
+                        "dns_time_ms": timings.get("dns_time_ms"),
+                        "connect_time_ms": timings.get("connect_time_ms"),
+                        "ttfb_ms": timings.get("ttfb_ms"),
+                        "total_time_ms": total_ms,
+                        "status_code": response.status,
+                        "content_size_bytes": len(body),
+                        "error": None,
+                    })
+
+            logger.warning("⚠️ Too many redirects for speed test: %s", _redact_url_credentials(raw_url))
+            return _empty_speed_test_result(raw_url, _TOO_MANY_REDIRECTS_MESSAGE)
+    except UnsafeHostError:
+        # A redirect hop targeted a disallowed internal/private address -
+        # discovered mid-request, same verdict as the pre-request guard.
+        logger.warning("🚫 Blocked SSRF attempt for speed test (redirect hop): %s", hostname)
+        return _empty_speed_test_result(raw_url, _SSRF_BLOCKED_MESSAGE)
+    except asyncio.TimeoutError:
+        logger.info("Speed test: %s timed out", hostname)
+        return _empty_speed_test_result(raw_url, _CONNECT_ERROR_MESSAGES["timeout"])
+    except aiohttp.ClientConnectorDNSError:
+        logger.info("Speed test: could not resolve %s", hostname)
+        return _empty_speed_test_result(raw_url, _CONNECT_ERROR_MESSAGES["dns"])
+    except aiohttp.ClientConnectorError:
+        logger.info("Speed test: could not connect to %s", hostname)
+        return _empty_speed_test_result(raw_url, _CONNECT_ERROR_MESSAGES["connection_failed"])
+    except aiohttp.ClientError:
+        logger.info("Speed test: %s is unreachable", hostname)
+        return _empty_speed_test_result(raw_url, "Website is unreachable")
+    except Exception as e:
+        logger.exception("💥 Unexpected error running speed test for %s: %s", hostname, str(e))
+        raise api_error(500, "Failed to run speed test", "SPEED_TEST_FAILED")
