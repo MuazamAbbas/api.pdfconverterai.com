@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     # future non-default port/host doesn't silently fall back to no PO Token
     # provider at all.
     bgutil_pot_provider_url: str = "http://127.0.0.1:4416"
+    # OpenRouter LLM provider key (ADR-018) - the OpenRouter-backed `ai`
+    # module tools (Keyword Research, Social Trend Analyzer, SEO Audit,
+    # Content Idea Generator) read this via `settings.openrouter_api_key`.
+    # Empty by default; the real value is provisioned in the VPS's .env,
+    # never hardcoded or committed here.
+    openrouter_api_key: str = ""
 
     class Config:
         env_file = ".env"
