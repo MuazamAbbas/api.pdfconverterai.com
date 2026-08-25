@@ -1,10 +1,14 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.security import verify_api_key
-from app.services.ai.grammar_checker import GrammarCheckerUnavailableError, check_grammar
+from app.services.ai.grammar_checker import (
+    MAX_TEXT_LENGTH,
+    GrammarCheckerUnavailableError,
+    check_grammar,
+)
 from app.services.ai_tools.sentiment import analyze_sentiment_service
 from app.shared.responses import api_error
 
@@ -17,7 +21,12 @@ class TextRequest(BaseModel):
 
 
 class GrammarCheckerRequest(BaseModel):
-    text: str
+    # A generous outer ceiling (not the exact MAX_TEXT_LENGTH business rule)
+    # so a wildly oversized body is rejected by Pydantic before it's fully
+    # parsed, without changing the precise "at most 20000 chars" 400 that
+    # `_validate_text` (checked below) already owns and existing tests
+    # assert on.
+    text: str = Field(..., max_length=MAX_TEXT_LENGTH * 5)
     language: str = "en-US"
 
 @router.get("/test", summary="Test AI Tools endpoint")

@@ -301,6 +301,20 @@ async def test_grammar_checker_whitespace_only_text_returns_400(grammar_client, 
 
 
 @asyncio_session
+async def test_grammar_checker_wildly_oversized_body_rejected_by_schema(grammar_client, api_key):
+    """A body well beyond even the generous Field(max_length=...) outer
+    ceiling is rejected by Pydantic (422) rather than being fully parsed and
+    handed to the service layer - defense-in-depth against an unbounded
+    body being parsed into memory before any business-rule check runs."""
+    resp = await grammar_client.post(
+        "/v1/ai_tools/grammar_checker",
+        json={"text": "a" * 200_000},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@asyncio_session
 async def test_grammar_checker_text_over_max_length_returns_400(grammar_client, api_key):
     resp = await grammar_client.post(
         "/v1/ai_tools/grammar_checker",
@@ -519,3 +533,32 @@ def test_apply_corrections_skips_match_with_no_replacement_suggestions():
 def test_apply_corrections_no_matches_returns_text_unchanged():
     text = "Nothing wrong here."
     assert _apply_corrections(text, []) == text
+
+
+def test_apply_corrections_genuinely_overlapping_spans_skips_the_earlier_one():
+    """Two matches whose spans truly overlap (not just adjacent) - e.g. two
+    different rules flagging intersecting parts of the same passage. The
+    later-applied (further-right) match wins; the earlier, now-conflicting
+    match is skipped rather than corrupting already-rewritten text."""
+    text = "abcdef"
+    matches = [
+        {"offset": 0, "length": 4, "replacements": [{"value": "ZZZZ"}]},  # "abcd", overlaps below
+        {"offset": 2, "length": 2, "replacements": [{"value": "Y"}]},  # "cd", offset 2-4
+    ]
+    corrected = _apply_corrections(text, matches)
+    # offset=2 applied first (rightmost), consumed_from becomes 2; offset=0
+    # match's span (0-4) exceeds that boundary, so it's skipped untouched.
+    assert corrected == "abYef"
+
+
+def test_apply_corrections_identical_offset_duplicate_matches_applies_only_one():
+    text = "abcdef"
+    matches = [
+        {"offset": 2, "length": 2, "replacements": [{"value": "X"}]},
+        {"offset": 2, "length": 2, "replacements": [{"value": "Y"}]},
+    ]
+    corrected = _apply_corrections(text, matches)
+    assert corrected in ("abXef", "abYef")
+    # Exactly one of the two duplicate-offset matches was applied, not both
+    # (which would have doubled up or corrupted the span).
+    assert len(corrected) == len(text) - 2 + 1

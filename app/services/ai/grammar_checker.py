@@ -74,22 +74,31 @@ def _apply_corrections(text: str, matches: list) -> str:
     by offset so rewriting one match never invalidates the offsets of
     matches still to be applied. A match with no replacement suggestions (or
     a malformed offset/length) is left untouched in the output rather than
-    guessed at."""
+    guessed at. If a match's span genuinely overlaps a later (further-right)
+    match that was already applied, it is skipped rather than applied - two
+    overlapping rewrites both touching `corrected` would corrupt offsets
+    that were only ever validated against the original `text`."""
     applicable = [
         m
         for m in matches
         if (m.get("replacements") or [{}])[0].get("value") is not None
         and isinstance(m.get("offset"), int)
         and isinstance(m.get("length"), int)
+        and m["offset"] >= 0
+        and m["length"] >= 0
     ]
     applicable.sort(key=lambda m: m["offset"], reverse=True)
 
     corrected = text
+    consumed_from = len(text)
     for match in applicable:
         offset = match["offset"]
         length = match["length"]
+        if offset + length > consumed_from:
+            continue
         replacement_value = match["replacements"][0]["value"]
         corrected = corrected[:offset] + replacement_value + corrected[offset + length:]
+        consumed_from = offset
     return corrected
 
 
