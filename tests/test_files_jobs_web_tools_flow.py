@@ -127,3 +127,16 @@ async def test_url_encode_endpoint_returns_encoded_url(client, api_key):
     assert resp.status_code == 200
     body = resp.json()
     assert body["encoded_url"] == "https%3A//example.com/a%20b"
+
+
+async def test_url_decode_endpoint_returns_decoded_url(client, api_key):
+    """Tier 1 (no job queue) endpoint sanity check - `url_decode` doesn't
+    go through the Job System at all, unlike `summarize`."""
+    resp = await client.post(
+        "/v1/web_tools/url_decode",
+        json={"url": "https%3A//example.com/a%20b"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["decoded_url"] == "https://example.com/a b"

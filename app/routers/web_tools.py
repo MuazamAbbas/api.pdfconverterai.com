@@ -24,7 +24,13 @@ from whois.parser import WhoisEntry
 from whois.whois import NICClient
 
 from app.core.security import verify_api_key
-from app.models.web_tools import IPLookupRequest, SpeedTestRequest, URLEncodeRequest, WhoisLookupRequest
+from app.models.web_tools import (
+    IPLookupRequest,
+    SpeedTestRequest,
+    URLDecodeRequest,
+    URLEncodeRequest,
+    WhoisLookupRequest,
+)
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
 from app.services.jobs.service import create_job, mark_failed, mark_queued
 from app.shared.network_security import UnsafeHostError, assert_host_is_safe, assert_host_is_safe_sync
@@ -125,6 +131,17 @@ async def url_encode(request: URLEncodeRequest, api_key: dict = Depends(verify_a
     except Exception as e:
         logger.exception("💥 Error encoding URL: %s", str(e))
         raise api_error(500, "Failed to encode URL", "URL_ENCODE_FAILED")
+
+@router.post("/url_decode", summary="Decode a URL")
+async def url_decode(request: URLDecodeRequest, api_key: dict = Depends(verify_api_key)):
+    logger.debug("🔧 Decoding URL: %s", request.url)
+    try:
+        decoded_url = urllib.parse.unquote(request.url)
+        logger.debug("✅ URL decoded: %s", decoded_url)
+        return {"original_url": request.url, "decoded_url": decoded_url}
+    except Exception as e:
+        logger.exception("💥 Error decoding URL: %s", str(e))
+        raise api_error(500, "Failed to decode URL", "URL_DECODE_FAILED")
 
 @router.post("/upload", summary="Upload a URL for webpage summarization jobs")
 async def upload_web_tools(payload: URLUploadRequest, api_key: dict = Depends(verify_api_key)):
