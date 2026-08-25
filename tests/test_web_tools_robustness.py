@@ -96,6 +96,42 @@ async def test_url_encode_generic_exception_returns_500_without_leaking_exceptio
 
 
 # ---------------------------------------------------------------------------
+# /url_decode
+# ---------------------------------------------------------------------------
+
+async def test_url_decode_valid_request_returns_200_with_correct_result(client, api_key):
+    resp = await client.post(
+        "/v1/web_tools/url_decode",
+        json={"url": urllib.parse.quote("https://example.com/a b?x=1&y=2")},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["decoded_url"] == "https://example.com/a b?x=1&y=2"
+
+
+async def test_url_decode_generic_exception_returns_500_without_leaking_exception_text(
+    client, api_key, monkeypatch
+):
+    monkeypatch.setattr(urllib.parse, "unquote", _boom)
+    resp = await client.post(
+        "/v1/web_tools/url_decode",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 500, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Failed to decode URL"
+    assert body["error"]["code"] == "URL_DECODE_FAILED"
+    assert "SECRET_MARKER" not in resp.text
+    assert "hunter2" not in resp.text
+    assert "db_password" not in resp.text
+    assert "RuntimeError" not in resp.text
+    assert "web_tools.py" not in resp.text
+
+
+# ---------------------------------------------------------------------------
 # /validate_url
 # ---------------------------------------------------------------------------
 
