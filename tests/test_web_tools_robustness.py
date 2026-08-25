@@ -44,6 +44,29 @@ def _boom(*args, **kwargs):
     )
 
 
+def _boom_unquote_only_for(target: str):
+    """Unlike `_boom` (used for `/url_encode`'s `urllib.parse.quote` patch),
+    this can't unconditionally replace `urllib.parse.unquote` - Starlette's
+    own request routing/dispatch also calls `urllib.parse.unquote`
+    internally, so a blanket patch raises *outside* `url_decode`'s own
+    try/except, landing in the generic top-level exception handler instead
+    of the endpoint's own `except Exception` branch this test is meant to
+    exercise. Delegating to the real `unquote` for every input except the
+    test's own request body value keeps the patch scoped to just the
+    endpoint's call."""
+    real_unquote = urllib.parse.unquote
+
+    def _wrapped(value, *args, **kwargs):
+        if value == target:
+            raise RuntimeError(
+                "SECRET_MARKER_never_reach_the_client db_password=hunter2 at "
+                "/app/routers/web_tools.py"
+            )
+        return real_unquote(value, *args, **kwargs)
+
+    return _wrapped
+
+
 def _make_client_response_error(status: int) -> aiohttp.ClientResponseError:
     request_info = aiohttp.RequestInfo(
         url="http://example.com",
@@ -88,6 +111,43 @@ async def test_url_encode_generic_exception_returns_500_without_leaking_exceptio
     assert body["success"] is False
     assert body["message"] == "Failed to encode URL"
     assert body["error"]["code"] == "URL_ENCODE_FAILED"
+    assert "SECRET_MARKER" not in resp.text
+    assert "hunter2" not in resp.text
+    assert "db_password" not in resp.text
+    assert "RuntimeError" not in resp.text
+    assert "web_tools.py" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# /url_decode
+# ---------------------------------------------------------------------------
+
+async def test_url_decode_valid_request_returns_200_with_correct_result(client, api_key):
+    resp = await client.post(
+        "/v1/web_tools/url_decode",
+        json={"url": urllib.parse.quote("https://example.com/a b?x=1&y=2")},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["decoded_url"] == "https://example.com/a b?x=1&y=2"
+
+
+async def test_url_decode_generic_exception_returns_500_without_leaking_exception_text(
+    client, api_key, monkeypatch
+):
+    target_url = "https://example.com/__test_boom_marker__"
+    monkeypatch.setattr(urllib.parse, "unquote", _boom_unquote_only_for(target_url))
+    resp = await client.post(
+        "/v1/web_tools/url_decode",
+        json={"url": target_url},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 500, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert body["message"] == "Failed to decode URL"
+    assert body["error"]["code"] == "URL_DECODE_FAILED"
     assert "SECRET_MARKER" not in resp.text
     assert "hunter2" not in resp.text
     assert "db_password" not in resp.text
