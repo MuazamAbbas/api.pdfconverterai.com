@@ -27,19 +27,28 @@ logger = logging.getLogger(__name__)
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Fixed free-tier model (ADR-018 decision: a single fixed model, no
-# per-request picker). Candidates named in the approved feature-spec
-# (docs/roadmap/SPRINT_STATUS.md, 2026-08-27 entry) were
+# per-request picker). All three candidates named in the approved
+# feature-spec (docs/roadmap/SPRINT_STATUS.md, 2026-08-27 entry) -
 # `meta-llama/llama-3.1-8b-instruct:free`,
 # `mistralai/mistral-small-3.1-24b-instruct:free`, and
-# `google/gemma-3-27b-it:free`. This environment has no live network access
-# to OpenRouter to A/B test quality/latency at implementation time, so
-# `meta-llama/llama-3.1-8b-instruct:free` was picked as the default per the
-# task brief - UNTESTED as of this writing. Quality/latency for structured
-# JSON output (the shape `keyword_research.py` needs) should be confirmed
-# via `test-runner`/live verification in a follow-up before this sees real
-# traffic, and revisited per-tool if a later OpenRouter pilot needs a
-# materially different quality/latency profile (ADR-018 trade-offs).
-OPENROUTER_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
+# `google/gemma-3-27b-it:free` - turned out to be retired from OpenRouter's
+# free tier by the time of live verification (2026-08-27): each now
+# returns a 404 with `"This model is unavailable for free..."`, confirmed
+# via a direct curl against the OpenRouter API, not assumed from our own
+# client's error handling. `GET /api/v1/models` was queried live to find
+# what's actually free today; `nvidia/nemotron-3-super-120b-a12b:free` was
+# picked after confirming it returns a real 200 for the exact
+# `keyword_research.py` prompt shape (10-15 item JSON array) in ~3.5s,
+# well under `DEFAULT_TIMEOUT_SECONDS`. It's a reasoning model - its
+# chain-of-thought lands in the response's separate `reasoning`/
+# `reasoning_details` fields, not `content`, so it doesn't interfere with
+# `_extract_json_array()` in `keyword_research.py`, which only ever reads
+# `content`. Revisit if OpenRouter retires this one too, or if a later
+# OpenRouter pilot needs a materially different quality/latency profile
+# (ADR-018 trade-offs) - re-verify live via `GET /api/v1/models` rather
+# than trusting this list to still be accurate; OpenRouter's free-tier
+# lineup churns.
+OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
 DEFAULT_TIMEOUT_SECONDS = 15
 
