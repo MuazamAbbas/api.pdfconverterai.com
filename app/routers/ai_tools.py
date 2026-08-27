@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.core.security import verify_api_key
+from app.services.ai.content_idea_generator import MAX_TOPIC_LENGTH
 from app.services.ai.grammar_checker import (
     MAX_TEXT_LENGTH,
     GrammarCheckerUnavailableError,
@@ -26,6 +27,11 @@ router = APIRouter(prefix="/ai_tools", tags=["AI Tools"])
 # router only needs to enqueue it by string, same as
 # `app/routers/text.py`'s `_create_text_job`.
 KEYWORD_RESEARCH_JOB_TYPE = "ai_keyword_research"
+
+# ARQ job type string for the Content Idea Generator Tier 2 processor
+# (`app/worker.py::ai_content_idea_generator`) - same enqueue-by-string
+# convention as KEYWORD_RESEARCH_JOB_TYPE above.
+CONTENT_IDEA_GENERATOR_JOB_TYPE = "ai_content_idea_generator"
 
 class TextRequest(BaseModel):
     text: str
@@ -50,6 +56,19 @@ class KeywordResearchUploadRequest(BaseModel):
 class KeywordResearchRequest(BaseModel):
     # Mirrors app/routers/text.py's FileIdRequest. No `model` field, ever -
     # ADR-018 decision 2: no client-supplied model picker.
+    file_id: str
+
+
+class ContentIdeaGeneratorUploadRequest(BaseModel):
+    # Same "generous outer ceiling, precise business rule lives in the
+    # service layer" pattern as KeywordResearchUploadRequest.seedKeyword.
+    topic: str = Field(..., max_length=MAX_TOPIC_LENGTH * 5)
+
+
+class ContentIdeaGeneratorRequest(BaseModel):
+    # Mirrors KeywordResearchRequest. No `model` field, ever - ADR-018
+    # decision 2 / the approved feature-spec: no client-supplied model
+    # picker, even though v1's version of this tool had one.
     file_id: str
 
 @router.get("/test", summary="Test AI Tools endpoint")
@@ -208,4 +227,113 @@ async def keyword_research(
     )
     return envelope(
         True, "Keyword research job created", data={"job_id": str(job.id), "status": "queued"}
+    )
+
+
+@router.post(
+    "/content_idea_generator/upload",
+    summary="Upload a topic for Content Idea Generator (async job)",
+)
+async def upload_content_idea_generator_topic(
+    payload: ContentIdeaGeneratorUploadRequest, api_key: dict = Depends(verify_api_key)
+):
+    """Tier 2 upload step. Mirrors `upload_keyword_research_seed` above
+    exactly - one module = one responsibility (Handbook Part C.3), and the
+    Job System requires a non-optional `fileId` on every job
+    (`app/services/jobs/service.py::create_job`) even for a short,
+    user-typed topic with no real file upload involved.
+    """
+    try:
+        owner_id = ObjectId(api_key["key_data"]["_id"])
+        file_doc = await save_text_input(payload.topic, owner_id, "topic.txt")
+    except UploadValidationError as e:
+        logger.warning("Content idea generator topic upload rejected: %s", e.message)
+        raise api_error(e.status_code, e.message, e.error_code)
+    except Exception as e:
+        logger.exception("Content idea generator topic upload failed: %s", str(e))
+        raise api_error(500, "Failed to upload topic", "UPLOAD_FAILED")
+
+    logger.info("Content idea generator topic uploaded: id=%s", file_doc.id)
+    return envelope(
+        True,
+        "Topic uploaded",
+        data={"file_id": str(file_doc.id), "filename": file_doc.originalFilename},
+    )
+
+
+async def _get_owned_content_idea_generator_file(file_id: str, api_key: dict):
+    """Ownership check, mirroring `_get_owned_keyword_research_file` above."""
+    file_doc = await get_file_by_id(file_id)
+    if file_doc is None:
+        raise api_error(404, "File not found or has expired", "FILE_NOT_FOUND")
+
+    owner_id = str(api_key["key_data"]["_id"])
+    if str(file_doc.ownerApiKeyId) != owner_id:
+        raise api_error(403, "Not authorized to use this file", "FILE_FORBIDDEN")
+    return file_doc
+
+
+@router.post(
+    "/content_idea_generator",
+    summary="Generate blog/video/social content ideas for a topic via OpenRouter (async job)",
+)
+async def content_idea_generator(
+    payload: ContentIdeaGeneratorRequest, request: Request, api_key: dict = Depends(verify_api_key)
+):
+    """Tier 2 (Processing, via Job System) per ADR-018/Handbook Part I.2,
+    same latency rationale as `keyword_research` above - creates a Job and
+    returns immediately; the actual OpenRouter call happens in the ARQ
+    worker's `ai_content_idea_generator` task (see
+    `app/services/ai/content_idea_generator.py::generate_content_ideas`,
+    the callable that task invokes).
+
+    Enforces the same shared `ai_tools`-wide daily cap (ADR-018 cost/abuse
+    protection) as `keyword_research` - one budget across every
+    OpenRouter-backed `ai_tools` endpoint, per `usage_limits.py`'s
+    docstring.
+    """
+    file_doc = await _get_owned_content_idea_generator_file(payload.file_id, api_key)
+
+    owner_id_str = str(api_key["key_data"]["_id"])
+    allowed = await check_and_increment_ai_tools_daily_usage(owner_id_str)
+    if not allowed:
+        raise api_error(
+            429,
+            "Daily AI tools request limit reached, try again tomorrow",
+            "AI_TOOLS_DAILY_LIMIT_EXCEEDED",
+        )
+
+    owner_id = ObjectId(owner_id_str)
+    try:
+        job = await create_job(file_doc.id, CONTENT_IDEA_GENERATOR_JOB_TYPE, owner_id)
+    except Exception as e:
+        # Same accepted low-probability edge case as `keyword_research`
+        # above: the daily-cap counter is already incremented at this
+        # point, so a rare Mongo hiccup here means the quota is consumed
+        # for a job that was never created.
+        logger.exception("Failed to create content idea generator job: %s", str(e))
+        raise api_error(503, "Job queue is temporarily unavailable", "QUEUE_UNAVAILABLE")
+
+    try:
+        await request.app.state.arq_redis.enqueue_job(
+            CONTENT_IDEA_GENERATOR_JOB_TYPE, str(job.id), _job_id=str(job.id)
+        )
+        await mark_queued(str(job.id))
+    except Exception as e:
+        logger.exception(
+            "Failed to enqueue job %s (%s): %s", job.id, CONTENT_IDEA_GENERATOR_JOB_TYPE, str(e)
+        )
+        await mark_failed(str(job.id), "Failed to queue job for processing")
+        raise api_error(503, "Job queue is temporarily unavailable", "QUEUE_UNAVAILABLE")
+
+    logger.info(
+        "Created job %s (%s) for file %s",
+        job.id,
+        CONTENT_IDEA_GENERATOR_JOB_TYPE,
+        payload.file_id,
+    )
+    return envelope(
+        True,
+        "Content idea generator job created",
+        data={"job_id": str(job.id), "status": "queued"},
     )
