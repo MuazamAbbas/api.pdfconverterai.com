@@ -36,21 +36,32 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # returns a 404 with `"This model is unavailable for free..."`, confirmed
 # via a direct curl against the OpenRouter API, not assumed from our own
 # client's error handling. `GET /api/v1/models` was queried live to find
-# what's actually free today; `nvidia/nemotron-3-super-120b-a12b:free` was
-# picked after confirming it returns a real 200 for the exact
-# `keyword_research.py` prompt shape (10-15 item JSON array) in ~3.5s,
-# well under `DEFAULT_TIMEOUT_SECONDS`. It's a reasoning model - its
-# chain-of-thought lands in the response's separate `reasoning`/
-# `reasoning_details` fields, not `content`, so it doesn't interfere with
-# `_extract_json_array()` in `keyword_research.py`, which only ever reads
-# `content`. Revisit if OpenRouter retires this one too, or if a later
-# OpenRouter pilot needs a materially different quality/latency profile
-# (ADR-018 trade-offs) - re-verify live via `GET /api/v1/models` rather
-# than trusting this list to still be accurate; OpenRouter's free-tier
-# lineup churns.
-OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+# what's actually free today.
+#
+# First replacement pick, `nvidia/nemotron-3-super-120b-a12b:free`, was
+# live-verified once at ~3.5s but then hit a real 15s+ timeout in a
+# same-session end-to-end job-pipeline re-test - a reasoning model with
+# widely variable latency is a bad fit for `DEFAULT_TIMEOUT_SECONDS`.
+# Settled on `liquid/lfm-2.5-2.6b:free` instead: a small, non-reasoning
+# model, live-verified 3 times in a row (4.97s/7.78s/10.44s - consistently
+# well under the 15s timeout) returning a directly-parseable JSON array
+# (no code-fence/prose wrapping needed) matching the exact
+# `keyword_research.py` prompt schema each time. Revisit if OpenRouter
+# retires this one too, or if a later OpenRouter pilot needs a materially
+# different quality/latency profile (ADR-018 trade-offs) - re-verify live
+# via `GET /api/v1/models` rather than trusting this list to still be
+# accurate; OpenRouter's free-tier lineup churns, and per-model latency is
+# not reliably predictable from a single sample - test at least 2-3 calls
+# with the real prompt shape before trusting a pick.
+OPENROUTER_MODEL = "liquid/lfm-2.5-2.6b:free"
 
-DEFAULT_TIMEOUT_SECONDS = 15
+# 25s, not 15s: the observed free-tier latency samples for the current
+# OPENROUTER_MODEL trended upward across 3 live runs (4.97s/7.78s/10.44s -
+# see that constant's comment), and the previous model choice's failure
+# mode was exactly a timeout at the old 15s ceiling. `app/worker.py`'s
+# `job_timeout = 300` for ai_keyword_research leaves ample room for a
+# bigger per-call ceiling here without risking the overall job timeout.
+DEFAULT_TIMEOUT_SECONDS = 25
 
 # --- Circuit breaker ---------------------------------------------------
 #
