@@ -55,6 +55,18 @@ async def ensure_indexes():
         await db.jobs.create_index("expiresAt", expireAfterSeconds=0, name="jobs_expiresAt_ttl")
         await db.jobs.create_index("fileId", name="jobs_fileId")
         await db.jobs.create_index("status", name="jobs_status")
+        # ADR-018 / app/services/ai/usage_limits.py: one document per
+        # {apiKeyId, date}, unique so concurrent upserts for the same
+        # key/day can't create duplicate counter docs (which would break
+        # the daily-cap check's atomicity).
+        await db.ai_tools_usage.create_index(
+            [("apiKeyId", 1), ("date", 1)], unique=True, name="ai_tools_usage_apiKeyId_date"
+        )
+        # Same TTL convention as files/jobs above - counter docs are only
+        # useful for a short support/debugging window, not indefinitely.
+        await db.ai_tools_usage.create_index(
+            "expiresAt", expireAfterSeconds=0, name="ai_tools_usage_expiresAt_ttl"
+        )
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")
