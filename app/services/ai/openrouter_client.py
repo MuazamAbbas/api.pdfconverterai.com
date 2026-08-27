@@ -55,7 +55,13 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # with the real prompt shape before trusting a pick.
 OPENROUTER_MODEL = "liquid/lfm-2.5-2.6b:free"
 
-DEFAULT_TIMEOUT_SECONDS = 15
+# 25s, not 15s: the observed free-tier latency samples for the current
+# OPENROUTER_MODEL trended upward across 3 live runs (4.97s/7.78s/10.44s -
+# see that constant's comment), and the previous model choice's failure
+# mode was exactly a timeout at the old 15s ceiling. `app/worker.py`'s
+# `job_timeout = 300` for ai_keyword_research leaves ample room for a
+# bigger per-call ceiling here without risking the overall job timeout.
+DEFAULT_TIMEOUT_SECONDS = 25
 
 # --- Circuit breaker ---------------------------------------------------
 #
