@@ -43,7 +43,17 @@ from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 def parse_env_file(path):
     """Parse a .env file into a dict. Handles comments, blank lines, an optional
     leading `export `, and single/double-quoted values. Last occurrence of a
-    duplicate key wins, matching standard dotenv behavior."""
+    duplicate key wins, matching standard dotenv behavior.
+
+    Deliberately hand-rolled rather than python-dotenv (already a backend
+    dependency): the standing copy of this script at
+    /usr/local/sbin/read_env_field.py on the VPS must run via plain `python3`
+    from any SSH session with no venv activation, and python-dotenv is only
+    installed inside the backend's own .venv there -- adding it as a
+    dependency would break that "always available" property. Covered by
+    tests/test_read_env_field.py so this stays a deliberate tradeoff, not an
+    untested one.
+    """
     values = {}
     with open(path, "r", encoding="utf-8") as f:
         for raw_line in f:
