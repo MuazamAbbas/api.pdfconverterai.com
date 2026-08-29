@@ -68,7 +68,7 @@ def test_worker_settings_wires_on_startup_and_on_shutdown_hooks():
     assert worker.WorkerSettings.on_shutdown is worker.on_shutdown
 
     functions = worker.WorkerSettings.functions
-    assert functions[:12] == [
+    assert functions[:13] == [
         worker.pdf_convert,
         worker.pdf_to_word,
         worker.pdf_summarize,
@@ -81,10 +81,11 @@ def test_worker_settings_wires_on_startup_and_on_shutdown_hooks():
         worker.web_tools_summarize,
         worker.ai_keyword_research,
         worker.ai_content_idea_generator,
+        worker.ai_social_trend_analyzer,
     ]
-    assert len(functions) == 13
+    assert len(functions) == 14
 
-    downloaders_entry = functions[12]
+    downloaders_entry = functions[13]
     assert isinstance(downloaders_entry, Function)
     assert downloaders_entry.coroutine is worker.downloaders_youtube
     assert downloaders_entry.timeout_s == 600
