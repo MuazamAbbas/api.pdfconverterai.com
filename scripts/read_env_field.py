@@ -23,17 +23,21 @@ Masking rules:
     - Empty value                  -> "SET (length=0)"
     - URL-shaped value with
       embedded credentials         -> credentials replaced with ***, e.g.
-                                       mongodb://***:***@host:27017/dbname
+                                       mongodb://***:***@host:27017/dbname?authSource=***
                                        (parsed with urllib.parse, not a hand-rolled regex --
                                        a regex-shape mismatch is exactly how the
-                                       2026-08-27 incident leaked a real password)
+                                       2026-08-27 incident leaked a real password). Query
+                                       param values and any fragment are masked too, since
+                                       either can carry a second secret independent of the
+                                       userinfo credentials (e.g. a signed-URL token) --
+                                       only param names survive, mapped to ***.
     - Any other value              -> "SET (length=N)"
 
 Exit codes: 0 = field found, 1 = field not set, 2 = file could not be read.
 """
 import argparse
 import sys
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 
 def parse_env_file(path):
@@ -67,10 +71,19 @@ def mask_value(value):
             parts = urlsplit(value)
             if parts.username or parts.password:
                 host = parts.hostname or ""
+                if host and ":" in host:  # IPv6 literal -- urlsplit strips the brackets
+                    host = f"[{host}]"
                 if parts.port:
                     host = f"{host}:{parts.port}"
                 netloc = f"***:***@{host}" if host else "***:***"
-                return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+                # A query string or fragment can carry its own secret (API key, signed-URL
+                # token, ...) independent of the userinfo credentials -- mask each value,
+                # keep only param names, and blank the fragment outright.
+                query = "&".join(
+                    f"{quote(k, safe='')}=***" for k, _ in parse_qsl(parts.query, keep_blank_values=True)
+                )
+                fragment = "***" if parts.fragment else ""
+                return urlunsplit((parts.scheme, netloc, parts.path, query, fragment))
         except ValueError:
             pass
     return f"SET (length={len(value)})"
@@ -94,7 +107,7 @@ def main():
 
     try:
         values = parse_env_file(args.file)
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         print(f"ERROR: cannot read {args.file}: {e}", file=sys.stderr)
         sys.exit(2)
 
