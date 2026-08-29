@@ -12,6 +12,7 @@ from app.services.ai.grammar_checker import (
     check_grammar,
 )
 from app.services.ai.keyword_research import MAX_SEED_KEYWORD_LENGTH
+from app.services.ai.social_trend_analyzer import MAX_TOPIC_LENGTH as SOCIAL_TREND_MAX_TOPIC_LENGTH
 from app.services.ai.usage_limits import check_and_increment_ai_tools_daily_usage
 from app.services.ai_tools.sentiment import analyze_sentiment_service
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
@@ -32,6 +33,11 @@ KEYWORD_RESEARCH_JOB_TYPE = "ai_keyword_research"
 # (`app/worker.py::ai_content_idea_generator`) - same enqueue-by-string
 # convention as KEYWORD_RESEARCH_JOB_TYPE above.
 CONTENT_IDEA_GENERATOR_JOB_TYPE = "ai_content_idea_generator"
+
+# ARQ job type string for the Social Trend Analyzer Tier 2 processor
+# (`app/worker.py::ai_social_trend_analyzer`) - same enqueue-by-string
+# convention as CONTENT_IDEA_GENERATOR_JOB_TYPE above.
+SOCIAL_TREND_ANALYZER_JOB_TYPE = "ai_social_trend_analyzer"
 
 class TextRequest(BaseModel):
     text: str
@@ -69,6 +75,19 @@ class ContentIdeaGeneratorRequest(BaseModel):
     # Mirrors KeywordResearchRequest. No `model` field, ever - ADR-018
     # decision 2 / the approved feature-spec: no client-supplied model
     # picker, even though v1's version of this tool had one.
+    file_id: str
+
+
+class SocialTrendAnalyzerUploadRequest(BaseModel):
+    # Same "generous outer ceiling, precise business rule lives in the
+    # service layer" pattern as ContentIdeaGeneratorUploadRequest.topic.
+    topic: str = Field(..., max_length=SOCIAL_TREND_MAX_TOPIC_LENGTH * 5)
+
+
+class SocialTrendAnalyzerRequest(BaseModel):
+    # Mirrors ContentIdeaGeneratorRequest. No `model` field, ever - ADR-018
+    # decision 2 / the approved feature-spec: no client-supplied model
+    # picker.
     file_id: str
 
 @router.get("/test", summary="Test AI Tools endpoint")
@@ -335,5 +354,114 @@ async def content_idea_generator(
     return envelope(
         True,
         "Content idea generator job created",
+        data={"job_id": str(job.id), "status": "queued"},
+    )
+
+
+@router.post(
+    "/social_trend_analyzer/upload",
+    summary="Upload a topic for Social Trend Analyzer (async job)",
+)
+async def upload_social_trend_analyzer_topic(
+    payload: SocialTrendAnalyzerUploadRequest, api_key: dict = Depends(verify_api_key)
+):
+    """Tier 2 upload step. Mirrors `upload_content_idea_generator_topic`
+    above exactly - one module = one responsibility (Handbook Part C.3), and
+    the Job System requires a non-optional `fileId` on every job
+    (`app/services/jobs/service.py::create_job`) even for a short,
+    user-typed topic with no real file upload involved.
+    """
+    try:
+        owner_id = ObjectId(api_key["key_data"]["_id"])
+        file_doc = await save_text_input(payload.topic, owner_id, "social_trend_topic.txt")
+    except UploadValidationError as e:
+        logger.warning("Social trend analyzer topic upload rejected: %s", e.message)
+        raise api_error(e.status_code, e.message, e.error_code)
+    except Exception as e:
+        logger.exception("Social trend analyzer topic upload failed: %s", str(e))
+        raise api_error(500, "Failed to upload topic", "UPLOAD_FAILED")
+
+    logger.info("Social trend analyzer topic uploaded: id=%s", file_doc.id)
+    return envelope(
+        True,
+        "Topic uploaded",
+        data={"file_id": str(file_doc.id), "filename": file_doc.originalFilename},
+    )
+
+
+async def _get_owned_social_trend_analyzer_file(file_id: str, api_key: dict):
+    """Ownership check, mirroring `_get_owned_content_idea_generator_file` above."""
+    file_doc = await get_file_by_id(file_id)
+    if file_doc is None:
+        raise api_error(404, "File not found or has expired", "FILE_NOT_FOUND")
+
+    owner_id = str(api_key["key_data"]["_id"])
+    if str(file_doc.ownerApiKeyId) != owner_id:
+        raise api_error(403, "Not authorized to use this file", "FILE_FORBIDDEN")
+    return file_doc
+
+
+@router.post(
+    "/social_trend_analyzer",
+    summary="Suggest trending hashtags and content ideas for a topic via OpenRouter (async job)",
+)
+async def social_trend_analyzer(
+    payload: SocialTrendAnalyzerRequest, request: Request, api_key: dict = Depends(verify_api_key)
+):
+    """Tier 2 (Processing, via Job System) per ADR-018/Handbook Part I.2,
+    same latency rationale as `content_idea_generator` above - creates a Job
+    and returns immediately; the actual OpenRouter call happens in the ARQ
+    worker's `ai_social_trend_analyzer` task (see
+    `app/services/ai/social_trend_analyzer.py::generate_social_trends`, the
+    callable that task invokes).
+
+    Enforces the same shared `ai_tools`-wide daily cap (ADR-018 cost/abuse
+    protection) as `keyword_research`/`content_idea_generator` - one budget
+    across every OpenRouter-backed `ai_tools` endpoint, per
+    `usage_limits.py`'s docstring.
+    """
+    file_doc = await _get_owned_social_trend_analyzer_file(payload.file_id, api_key)
+
+    owner_id_str = str(api_key["key_data"]["_id"])
+    allowed = await check_and_increment_ai_tools_daily_usage(owner_id_str)
+    if not allowed:
+        raise api_error(
+            429,
+            "Daily AI tools request limit reached, try again tomorrow",
+            "AI_TOOLS_DAILY_LIMIT_EXCEEDED",
+        )
+
+    owner_id = ObjectId(owner_id_str)
+    try:
+        job = await create_job(file_doc.id, SOCIAL_TREND_ANALYZER_JOB_TYPE, owner_id)
+    except Exception as e:
+        # Same accepted low-probability edge case as `content_idea_generator`
+        # above: the daily-cap counter is already incremented at this
+        # point, so a rare Mongo hiccup here means the quota is consumed
+        # for a job that was never created.
+        logger.exception("Failed to create social trend analyzer job: %s", str(e))
+        raise api_error(503, "Job queue is temporarily unavailable", "QUEUE_UNAVAILABLE")
+
+    try:
+        await request.app.state.arq_redis.enqueue_job(
+            SOCIAL_TREND_ANALYZER_JOB_TYPE, str(job.id), _job_id=str(job.id)
+        )
+        await mark_queued(str(job.id))
+    except Exception as e:
+        logger.exception(
+            "Failed to enqueue job %s (%s): %s", job.id, SOCIAL_TREND_ANALYZER_JOB_TYPE, str(e)
+        )
+        await mark_failed(str(job.id), "Failed to queue job for processing")
+        raise api_error(503, "Job queue is temporarily unavailable", "QUEUE_UNAVAILABLE")
+
+    logger.info(
+        "Created job %s (%s) for file %s",
+        job.id,
+        SOCIAL_TREND_ANALYZER_JOB_TYPE,
+        payload.file_id,
+    )
+    return envelope(
+        True,
+        "Social trend analyzer job created",
         data={"job_id": str(job.id), "status": "queued"},
     )

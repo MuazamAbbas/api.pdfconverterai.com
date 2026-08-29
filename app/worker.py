@@ -334,6 +334,15 @@ async def ai_content_idea_generator(ctx, job_id: str) -> None:
     await _run_job(ctx, job_id, ContentIdeaGeneratorProcessor, build_result)
 
 
+async def ai_social_trend_analyzer(ctx, job_id: str) -> None:
+    from app.services.ai.processors import SocialTrendAnalyzerProcessor
+
+    async def build_result(job, file_doc, raw_result):
+        return raw_result  # {"topic": "...", "hashtags": [...], "contentIdeas": [...]}
+
+    await _run_job(ctx, job_id, SocialTrendAnalyzerProcessor, build_result)
+
+
 async def downloaders_youtube(ctx, job_id: str) -> None:
     from app.services.downloaders.processors import DownloadersYoutubeProcessor
 
@@ -426,6 +435,7 @@ class WorkerSettings:
         web_tools_summarize,
         ai_keyword_research,
         ai_content_idea_generator,
+        ai_social_trend_analyzer,
         # `downloaders_youtube` gets its own longer `timeout` (arq 0.28.0's
         # `func()` supports a genuine per-function override, confirmed
         # against the installed arq version rather than assumed - see

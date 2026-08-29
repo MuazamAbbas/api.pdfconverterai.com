@@ -13,7 +13,8 @@ pdf/image/text/ai) - `jobs` never imports anything from `ai`.
 This is the first module with Processors filed under `app/services/ai/` -
 Keyword Research (ADR-018) is the first Tier 2 AI tool, Content Idea
 Generator (ADR-018's third pilot, same Tier 2/module placement, same
-Job-System shape) the second; Grammar Checker
+Job-System shape) the second, Social Trend Analyzer (ADR-018's fourth
+pilot, same Tier 2/module placement/shape again) the third; Grammar Checker
 (`app/services/ai/grammar_checker.py`) stays Tier 1 (single bounded
 LanguageTool call, no job queue).
 """
@@ -151,3 +152,70 @@ class ContentIdeaGeneratorProcessor(Processor):
     async def verify(self, job, file_doc, result):
         if not (result.get("blogTitles") and result.get("videoConcepts") and result.get("socialPosts")):
             raise PermanentProcessingError("Content idea generation produced an incomplete result")
+
+
+def _read_social_trend_topic_input(file_doc) -> str:
+    """Read the small topic text file this job processes.
+
+    Same shape as `_read_topic_input` above and
+    `app/services/text/processors.py::_read_text_input` - the file backing
+    an `ai_social_trend_analyzer` job is always a small UTF-8 text file
+    written by `save_text_input`
+    (`app/services/files/service.py`, via
+    `app/routers/ai_tools.py::upload_social_trend_analyzer_topic`), never a
+    real binary upload - read directly as text, not binary.
+
+    Deliberately its own function rather than reusing `_read_topic_input`
+    above (identical body) - keeps each Processor's helper self-contained
+    and matches the existing convention of a dedicated `_read_*_input`
+    helper per tool in this module.
+    """
+    if not os.path.exists(file_doc.storagePath):
+        raise PermanentProcessingError("Source file is missing or has expired")
+    with open(file_doc.storagePath, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+class SocialTrendAnalyzerProcessor(Processor):
+    """job.type == "ai_social_trend_analyzer" """
+
+    async def validate(self, job, file_doc):
+        topic = _read_social_trend_topic_input(file_doc)
+        if not topic or not topic.strip():
+            raise PermanentProcessingError("Topic must be a non-empty string")
+
+    async def prepare(self, job, file_doc):
+        return {"topic": _read_social_trend_topic_input(file_doc)}
+
+    async def execute(self, job, file_doc, prepared, ctx=None):
+        from app.services.ai.social_trend_analyzer import (
+            SocialTrendAnalyzerUnavailableError,
+            generate_social_trends,
+        )
+
+        try:
+            result = await generate_social_trends(prepared["topic"])
+        except ValueError as e:
+            # Fixed, hardcoded message rather than `str(e)` - decouples this
+            # client-facing contract from `generate_social_trends`'s text
+            # (same convention as `ContentIdeaGeneratorProcessor.execute`
+            # above).
+            raise PermanentProcessingError("Topic must be a valid, non-empty string") from e
+        except SocialTrendAnalyzerUnavailableError as e:
+            # A clean "service unavailable" case (OpenRouter down, circuit
+            # breaker tripped, or unparseable model response) - not
+            # something a retry within this job's short lifetime will fix,
+            # so this fails permanently rather than retrying, mirroring
+            # `ContentIdeaGeneratorProcessor.execute`'s equivalent handling
+            # (`SocialTrendAnalyzerUnavailableError`'s own docstring
+            # documents this exact expectation).
+            raise PermanentProcessingError(
+                "Social trend analysis is temporarily unavailable, please try again shortly"
+            ) from e
+        except Exception as e:
+            raise TransientProcessingError("Temporary error analyzing social trends") from e
+        return result
+
+    async def verify(self, job, file_doc, result):
+        if not (result.get("hashtags") and result.get("contentIdeas")):
+            raise PermanentProcessingError("Social trend analysis produced an incomplete result")
