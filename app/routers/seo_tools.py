@@ -9,11 +9,14 @@ from app.services.seo.content_readability_analyzer import analyze_readability
 from app.services.seo.keyword_density import keyword_density
 from app.services.seo.keyword_extract import extract_keywords_service
 from app.services.seo.meta_tag_generator import generate_meta_tags
+from app.services.seo.seo_audit import run_seo_audit
 from app.services.seo.serp_preview import analyze_serp_preview
 from app.services.seo.social_media_tags_generator import generate_social_media_tags
 from app.services.seo.title_length_checker import check_title_length
 from app.services.seo.url_slug_generator import generate_slug
+from app.services.seo.usage_limits import check_and_increment_seo_audit_hourly_usage
 from app.shared.responses import api_error
+from app.shared.web.redirect_fetch import _redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,9 @@ class SocialMediaTagsGeneratorRequest(BaseModel):
 class SerpPreviewRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     description: str = Field(..., min_length=1, max_length=2000)
+    url: str = Field(..., min_length=1, max_length=2000)
+
+class SeoAuditRequest(BaseModel):
     url: str = Field(..., min_length=1, max_length=2000)
 
 @router.post("/keyword_density", summary="Calculate keyword density")
@@ -167,3 +173,39 @@ async def serp_preview(request: SerpPreviewRequest, api_key: dict = Depends(veri
     except Exception as e:
         logger.exception("💥 Error building SERP preview: %s", str(e))
         raise api_error(500, "Failed to build SERP preview", "SERP_PREVIEW_FAILED")
+
+@router.post(
+    "/seo_audit",
+    summary="Audit a URL across meta tags, headings, broken links, sitemap, image alt-text, and page speed",
+)
+async def seo_audit(request: SeoAuditRequest, api_key: dict = Depends(verify_api_key)):
+    """Tier 1 (Handbook Part I.2), bounded per the approved feature-spec
+    (docs/roadmap/SPRINT_STATUS.md 2026-08-31 entry). Enforces a dedicated
+    hourly cap (`app/services/seo/usage_limits.py`) on top of the generic
+    per-key daily quota `verify_api_key` already applies, before starting
+    the audit - this endpoint's multi-fetch shape carries materially more
+    abuse/concurrent-load surface than this router's other, single-
+    computation endpoints.
+    """
+    safe_url = _redact_url_credentials(request.url)
+    logger.debug("🔧 Running SEO audit for: %s", safe_url)
+
+    owner_id_str = str(api_key["key_data"]["_id"])
+    allowed = await check_and_increment_seo_audit_hourly_usage(owner_id_str)
+    if not allowed:
+        raise api_error(
+            429,
+            "Hourly SEO Audit request limit reached, try again later",
+            "SEO_AUDIT_RATE_LIMIT_EXCEEDED",
+        )
+
+    try:
+        result = await run_seo_audit(request.url)
+        logger.info("✅ SEO audit completed for: %s", safe_url)
+        return result
+    except ValueError as e:
+        logger.error("❌ Invalid input: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("💥 Error running SEO audit for %s: %s", safe_url, str(e))
+        raise api_error(500, "Failed to run SEO audit", "SEO_AUDIT_FAILED")
