@@ -19,7 +19,10 @@ checked link) is guarded by `app.shared.network_security.assert_host_is_safe`
 explicit per-hop calls in `_fetch_main_page` (mirroring
 `app/routers/web_tools.py::speed_test`'s own manual redirect loop, which
 needs the same per-hop re-validation because it also captures per-hop
-timing and therefore can't just delegate to `check_url`).
+timing and therefore can't just delegate to `check_url`). Per-hop timing
+itself reuses the relocated `app.shared.web.speed_trace._build_speed_trace_config`
+- also moved out of `app/routers/web_tools.py` in this change, so this
+service never imports from a router module (Handbook Part C.3).
 
 No unbounded crawling: link discovery is capped at `_MAX_LINKS_CHECKED`,
 the main page body is capped at `_MAX_HTML_BYTES`, and broken-link checking
@@ -36,7 +39,6 @@ import urllib.parse
 import aiohttp
 from bs4 import BeautifulSoup
 
-from app.routers.web_tools import _build_speed_trace_config
 from app.shared.network_security import UnsafeHostError, assert_host_is_safe
 from app.shared.web.redirect_fetch import (
     _MAX_REDIRECT_HOPS,
@@ -44,6 +46,7 @@ from app.shared.web.redirect_fetch import (
     _redact_url_credentials,
     check_url,
 )
+from app.shared.web.speed_trace import _build_speed_trace_config
 
 logger = logging.getLogger(__name__)
 
