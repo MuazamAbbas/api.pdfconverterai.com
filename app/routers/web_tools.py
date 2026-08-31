@@ -19,7 +19,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ipwhois import IPWhois
 from ipwhois.exceptions import BaseIpwhoisException, IPDefinedError
 from pydantic import BaseModel
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from whois.parser import WhoisEntry
 from whois.whois import NICClient
 
@@ -35,6 +34,12 @@ from app.services.files.service import UploadValidationError, get_file_by_id, sa
 from app.services.jobs.service import create_job, mark_failed, mark_queued
 from app.shared.network_security import UnsafeHostError, assert_host_is_safe, assert_host_is_safe_sync
 from app.shared.responses import api_error, envelope
+from app.shared.web.redirect_fetch import (
+    _MAX_REDIRECT_HOPS,
+    _REDIRECT_STATUSES,
+    _redact_url_credentials,
+    check_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +48,6 @@ router = APIRouter(prefix="/web_tools", tags=["Web Tools"])
 DNS_RECORD_TYPES = ("A", "AAAA", "MX", "TXT", "NS", "CNAME")
 
 _SSRF_BLOCKED_MESSAGE = "Cannot check internal or reserved network addresses"
-
-# Redirect hops `check_url()` will follow manually before giving up - matches
-# typical browser/requests defaults, bounded rather than unlimited so a
-# redirect loop degrades to a clean "too many redirects" result instead of
-# spinning forever.
-_MAX_REDIRECT_HOPS = 5
-_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 _CONNECT_ERROR_MESSAGES = {
     "timeout": "Connection to the domain timed out",
@@ -81,27 +79,6 @@ class FileIdRequest(BaseModel):
 
 class DomainRequest(BaseModel):
     domain: str
-
-
-def _redact_url_credentials(url: str) -> str:
-    """Strips embedded userinfo (`user:pass@host`) from a URL before it is
-    logged (Handbook Part C.10: logging must never capture credentials/
-    secrets). No-op for URLs that don't carry userinfo, so the common case
-    logs exactly what it did before this change."""
-    try:
-        parsed = urllib.parse.urlparse(url)
-        if not parsed.username and not parsed.password:
-            return url
-        host = parsed.hostname or ""
-        netloc = f"{host}:{parsed.port}" if parsed.port else host
-        return parsed._replace(netloc=netloc).geturl()
-    except ValueError:
-        # Covers both a malformed `urlparse()` call itself and a malformed
-        # port (e.g. `http://user:pass@host:abc/path`) - `.port` is a lazy
-        # property on the parse result that raises ValueError separately
-        # from `urlparse()`, so it must live inside this same try block to
-        # degrade to the same "couldn't parse, return as-is" fallback.
-        return url
 
 
 def _extract_hostname(value: str) -> str | None:
@@ -200,81 +177,6 @@ async def _create_web_tools_job(request: Request, file_id: str, job_type: str, a
 async def webpage_summarize(payload: FileIdRequest, request: Request, api_key: dict = Depends(verify_api_key)):
     data = await _create_web_tools_job(request, payload.file_id, "web_tools_summarize", api_key)
     return envelope(True, "Summarization job created", data=data)
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type(aiohttp.ClientResponseError),
-    reraise=True,
-    before_sleep=lambda retry_state: logger.debug("Retrying URL validation: attempt %d", retry_state.attempt_number)
-)
-async def check_url(session: aiohttp.ClientSession, url: str) -> tuple[bool, int]:
-    """SSRF-guarded (Handbook Part C.10): resolves the target hostname and
-    rejects private/loopback/link-local/reserved/multicast addresses before
-    connecting - retrofitted here (not just on the new endpoints below)
-    because both `validate_url` and `website_down_detector` share this one
-    function, and there was previously no SSRF protection anywhere on this
-    path. Raises `UnsafeHostError`, which is not in `retry_if_exception_type`
-    above, so it propagates immediately instead of being retried.
-
-    Redirects are followed manually (`allow_redirects=False` on the actual
-    request, with an explicit loop below) rather than delegating to aiohttp's
-    own `allow_redirects=True`, specifically so every redirect hop's target
-    host is re-validated against `assert_host_is_safe()` before it's
-    followed - otherwise a plain public URL that 302s to
-    `http://169.254.169.254/...` (or any other internal address) would
-    bypass the guard above entirely, since that guard only ever checked the
-    original hostname. Bounded to `_MAX_REDIRECT_HOPS` hops; exceeding that
-    raises `aiohttp.TooManyRedirects` (a `ClientResponseError` subclass),
-    matching what aiohttp itself would raise for the equivalent
-    `allow_redirects=True` case - callers already handle `ClientResponseError`
-    generically, so no new except clause was needed for this."""
-    hostname = urllib.parse.urlparse(url).hostname
-    if hostname:
-        await assert_host_is_safe(hostname)
-
-    current_url = url
-    for _hop in range(_MAX_REDIRECT_HOPS + 1):
-        async with session.get(current_url, allow_redirects=False, timeout=5) as response:
-            status = response.status
-            location = response.headers.get("Location")
-            if status in _REDIRECT_STATUSES and location:
-                next_url = urllib.parse.urljoin(current_url, location)
-                next_hostname = urllib.parse.urlparse(next_url).hostname
-                if next_hostname:
-                    # Raises UnsafeHostError on an unsafe redirect target -
-                    # not caught here, propagates to the caller exactly like
-                    # the pre-request check above.
-                    await assert_host_is_safe(next_hostname)
-                logger.debug(
-                    "↪️ Following redirect: %s -> %s, status: %d",
-                    _redact_url_credentials(current_url), _redact_url_credentials(next_url), status
-                )
-                current_url = next_url
-                continue
-            safe_current_url = _redact_url_credentials(current_url)
-            if 200 <= status < 400:
-                logger.debug("✅ URL is reachable: %s, status: %d", safe_current_url, status)
-                return True, status
-            elif status == 429:
-                logger.warning("⚠️ Rate limit hit for URL: %s, status: %d", safe_current_url, status)
-                raise aiohttp.ClientResponseError(
-                    request_info=response.request_info,
-                    history=response.history,
-                    status=status,
-                    message="Too Many Requests"
-                )
-            else:
-                logger.error("❌ URL is not reachable: %s, status: %d", safe_current_url, status)
-                return False, status
-
-    logger.warning("⚠️ Too many redirects for URL: %s", _redact_url_credentials(url))
-    raise aiohttp.TooManyRedirects(
-        request_info=response.request_info,
-        history=response.history,
-        status=response.status,
-        message="Too Many Redirects",
-    )
 
 @router.post("/validate_url", summary="Validate URL and check if it is reachable")
 async def validate_url(request: URLRequest, api_key: dict = Depends(verify_api_key)):

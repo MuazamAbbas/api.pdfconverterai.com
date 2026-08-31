@@ -67,6 +67,21 @@ async def ensure_indexes():
         await db.ai_tools_usage.create_index(
             "expiresAt", expireAfterSeconds=0, name="ai_tools_usage_expiresAt_ttl"
         )
+        # Feature-spec approved 2026-08-31 (SEO Audit) /
+        # app/services/seo/usage_limits.py: one document per
+        # {apiKeyId, hourBucket}, unique so concurrent upserts for the same
+        # key/hour can't create duplicate counter docs (which would break
+        # the hourly-cap check's atomicity). New collection - flagged for
+        # database-agent review per CLAUDE.md's "don't invent a new
+        # collection without flagging it" rule, same convention
+        # `ai_tools_usage` above was flagged under.
+        await db.seo_tools_usage.create_index(
+            [("apiKeyId", 1), ("hourBucket", 1)], unique=True, name="seo_tools_usage_apiKeyId_hourBucket"
+        )
+        # Same TTL convention as files/jobs/ai_tools_usage above.
+        await db.seo_tools_usage.create_index(
+            "expiresAt", expireAfterSeconds=0, name="seo_tools_usage_expiresAt_ttl"
+        )
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")
