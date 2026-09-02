@@ -82,6 +82,14 @@ async def ensure_indexes():
         await db.seo_tools_usage.create_index(
             "expiresAt", expireAfterSeconds=0, name="seo_tools_usage_expiresAt_ttl"
         )
+        # `auth` module (ADR-019 pending) - `admin_users` is a new collection,
+        # flagged per CLAUDE.md's "don't invent a new collection without
+        # flagging it" rule. Unique on email so two concurrent
+        # `scripts/seed_admin.py` runs for the same address can't create
+        # duplicate documents (app/services/auth/admin_user_service.py's
+        # own find-before-insert check is a TOCTOU-vulnerable first line of
+        # defense only; this index is the actual guarantee).
+        await db.admin_users.create_index("email", unique=True, name="admin_users_email_unique")
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")

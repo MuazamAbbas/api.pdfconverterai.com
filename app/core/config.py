@@ -52,6 +52,27 @@ class Settings(BaseSettings):
     # Empty by default; the real value is provisioned in the VPS's .env,
     # never hardcoded or committed here.
     openrouter_api_key: str = ""
+    # `auth` module (ADR-019, pending) - human-admin login, entirely separate
+    # from `verify_api_key`'s service-to-service x-api-key mechanism above.
+    # Signing secret for the JWT issued by `POST /auth/login` and verified by
+    # `app/core/admin_auth.py::require_admin`. No default: unlike the
+    # optional provider keys above, an empty/guessable secret here would let
+    # anyone forge a valid admin session token, so the app must fail to
+    # start rather than silently run with one. Provisioned via the VPS's
+    # .env only - never hardcoded or committed (see backend/scripts/
+    # seed_admin.py's docstring for the exact .env keys this feature needs).
+    admin_jwt_secret: str
+    admin_jwt_algorithm: str = "HS256"
+    # Handbook-specified short-lived window (8-12h) for the admin session
+    # cookie/JWT - long enough for a single working session, short enough
+    # to bound the blast radius of a leaked cookie.
+    admin_jwt_expires_hours: int = 10
+    # Brute-force mitigation on POST /auth/login (founder-approved spec):
+    # after this many consecutive failed attempts for one admin_users email,
+    # that account is locked out for admin_login_lockout_minutes regardless
+    # of whether the password given afterward is correct.
+    admin_login_max_attempts: int = 5
+    admin_login_lockout_minutes: int = 15
 
     class Config:
         env_file = ".env"

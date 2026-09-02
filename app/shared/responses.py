@@ -27,3 +27,38 @@ def api_error(status_code: int, message: str, error_code: str) -> HTTPException:
     stack traces here - only safe, generic messages (Handbook Part C.10).
     """
     return HTTPException(status_code=status_code, detail=envelope(False, message, error_code=error_code))
+
+
+# Field-name substrings (case-insensitive, matched against the dotted
+# `loc` path pydantic gives each error) that must never have their raw
+# submitted `input` value logged - mirrors the `_mask_key`-style discipline
+# in `app/core/security.py`, generalized to any request body field rather
+# than just API keys. Exists because Pydantic v2's `RequestValidationError.
+# errors()` includes the raw submitted value for every failing field by
+# default, and `app/main.py`'s global `validation_exception_handler` logs
+# that list verbatim - without this, a malformed login request (e.g. an
+# over-length password, which fails `AdminLoginRequest.password`'s own
+# `Field(max_length=...)` bound) would write the plaintext attempted
+# password straight into the shared error.log. Applied globally in the
+# handler (not special-cased per router) since any current or future
+# endpoint's body could contain a similarly sensitive field.
+_SENSITIVE_LOC_SUBSTRINGS = ("password", "token", "secret", "key", "credential")
+
+
+def redact_validation_errors(errors: list) -> list:
+    """Returns pydantic's `exc.errors()` list with the `input` value
+    replaced for any error whose `loc` contains a sensitive field-name
+    substring (see `_SENSITIVE_LOC_SUBSTRINGS`). Never mutates the list/
+    dicts FastAPI/pydantic handed in - callers (currently
+    `app/main.py::validation_exception_handler`) may still need the
+    original for other purposes.
+    """
+    redacted = []
+    for err in errors:
+        err = dict(err)
+        loc = err.get("loc", ())
+        loc_str = " ".join(str(part) for part in loc).lower()
+        if "input" in err and any(s in loc_str for s in _SENSITIVE_LOC_SUBSTRINGS):
+            err["input"] = "***REDACTED***"
+        redacted.append(err)
+    return redacted
