@@ -90,6 +90,30 @@ async def ensure_indexes():
         # own find-before-insert check is a TOCTOU-vulnerable first line of
         # defense only; this index is the actual guarantee).
         await db.admin_users.create_index("email", unique=True, name="admin_users_email_unique")
+        # `admin` module (ADR-019) - `homepage_sections` is a new collection,
+        # flagged per CLAUDE.md's "don't invent a new collection without
+        # flagging it" rule, same convention as `admin_users` above. Full
+        # indexing/uniqueness reasoning lives in
+        # app/schemas/homepage_section.py's module docstring; summary:
+        #   - `order` indexed (non-unique) - backs both the public read
+        #     path (`find({enabled: True}).sort("order")`) and the admin
+        #     list path (`find({}).sort("order")`). NOT unique: the bulk
+        #     reorder endpoint can transiently write colliding `order`
+        #     values mid-batch, which a unique index would reject.
+        #   - `type` gets a *partial* unique index scoped to
+        #     `type: "tool_grid"` only, so MongoDB guarantees at most one
+        #     tool_grid document can ever exist (the homepage's structural
+        #     section) - a DB-layer backstop for the route layer's
+        #     DELETE-rejection logic, not a substitute for it.
+        # No TTL index: homepage sections have no natural expiry (this is
+        # structural site config, not transient processing/upload metadata).
+        await db.homepage_sections.create_index("order", name="homepage_sections_order")
+        await db.homepage_sections.create_index(
+            "type",
+            unique=True,
+            partialFilterExpression={"type": "tool_grid"},
+            name="homepage_sections_type_tool_grid_unique",
+        )
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")

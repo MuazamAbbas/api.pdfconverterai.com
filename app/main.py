@@ -24,6 +24,7 @@ from app.core.rate_limiter import limiter  # noqa: E402
 from app.core.security import verify_api_key  # noqa: E402
 from app.core.storage import cleanup_expired_files  # noqa: E402
 from app.routers import (  # noqa: E402
+    admin,
     ai_tools,
     auth,
     binary_tools,
@@ -114,6 +115,20 @@ protected_dependency = [Depends(verify_api_key), Depends(get_rate_limit)]
 # unauthenticated too (always succeeds so a client can clear stale/expired
 # cookie state either way).
 app.include_router(auth.router, prefix="/v1", tags=["Auth"])
+# `admin` (ADR-019, Homepage Sections CMS) - two APIRouter instances on
+# purpose (see app/routers/admin.py's module docstring for the full
+# reasoning): `admin.public_router` is the single unauthenticated
+# GET /v1/admin/homepage-sections route (no x-api-key, no admin session -
+# spec requirement, the public homepage reads this with no credential).
+# `admin.router` is every other route (list-all/create/update/reorder/
+# delete) and gets `protected_dependency` here exactly like every other
+# tool router below - NOT the bare-router exemption `auth.router` gets,
+# since `admin` has no login chicken-and-egg problem to justify skipping
+# the router-level x-api-key check. Each of those routes also carries its
+# own `Depends(require_admin)`, so writes end up with both layers
+# (ADR-008 Secure by Default) rather than relying on either alone.
+app.include_router(admin.public_router, prefix="/v1", tags=["Admin"])
+app.include_router(admin.router, prefix="/v1", tags=["Admin"], dependencies=protected_dependency)
 app.include_router(ai_tools.router, prefix="/v1", tags=["AI Tools"], dependencies=protected_dependency)
 app.include_router(seo_tools.router, prefix="/v1", tags=["SEO Tools"], dependencies=protected_dependency)
 app.include_router(web_tools.router, prefix="/v1", tags=["Web Tools"], dependencies=protected_dependency)
