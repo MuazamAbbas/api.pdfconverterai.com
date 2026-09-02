@@ -13,18 +13,19 @@ from fastapi import Depends, FastAPI, Request  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
-from slowapi import Limiter, _rate_limit_exceeded_handler  # noqa: E402
+from slowapi import _rate_limit_exceeded_handler  # noqa: E402
 from slowapi.errors import RateLimitExceeded  # noqa: E402
-from slowapi.util import get_remote_address  # noqa: E402
 from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 from transformers import pipeline  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.core.database import ensure_indexes  # noqa: E402
+from app.core.rate_limiter import limiter  # noqa: E402
 from app.core.security import verify_api_key  # noqa: E402
 from app.core.storage import cleanup_expired_files  # noqa: E402
 from app.routers import (  # noqa: E402
     ai_tools,
+    auth,
     binary_tools,
     calculators,
     categories,
@@ -42,6 +43,7 @@ from app.routers import (  # noqa: E402
     video,
     web_tools,
 )
+from app.shared.responses import redact_validation_errors  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +85,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Rate limiter
-limiter = Limiter(key_func=get_remote_address)
+# Rate limiter (Limiter instance itself now lives in app/core/rate_limiter.py
+# so app/routers/auth.py can import and reuse the same instance for
+# POST /auth/login's brute-force mitigation).
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -100,6 +103,17 @@ async def get_rate_limit(key_info: dict = Depends(verify_api_key)):
 protected_dependency = [Depends(verify_api_key), Depends(get_rate_limit)]
 
 # Include routers with /v1 prefix and tags
+#
+# auth is deliberately NOT given `protected_dependency` (verify_api_key):
+# it is a brand-new, separate human-admin login surface (JWT-via-httpOnly-
+# cookie), not the existing service-to-service x-api-key mechanism - see
+# app/core/security.py's verify_api_key (untouched) vs
+# app/core/admin_auth.py's require_admin (new). POST /auth/login is the
+# entry point human operators use *before* they have any credential, so it
+# can never itself require one; POST /auth/logout is intentionally
+# unauthenticated too (always succeeds so a client can clear stale/expired
+# cookie state either way).
+app.include_router(auth.router, prefix="/v1", tags=["Auth"])
 app.include_router(ai_tools.router, prefix="/v1", tags=["AI Tools"], dependencies=protected_dependency)
 app.include_router(seo_tools.router, prefix="/v1", tags=["SEO Tools"], dependencies=protected_dependency)
 app.include_router(web_tools.router, prefix="/v1", tags=["Web Tools"], dependencies=protected_dependency)
@@ -140,7 +154,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     # header at all) hits this handler instead of StarletteHTTPException -
     # without it, callers got FastAPI's stock {"detail": [...]} shape here
     # while an *invalid* API key value correctly got the standard envelope.
-    logger.warning("Request validation failed on %s: %s", request.url.path, exc.errors())
+    #
+    # `exc.errors()` includes pydantic's raw submitted `input` value for every
+    # failing field by default - redacted here before logging (see
+    # app/shared/responses.py::redact_validation_errors docstring for why:
+    # an over-length/malformed POST /v1/auth/login body would otherwise
+    # write the plaintext attempted password straight into error.log).
+    # Applied globally, not just for auth, since any endpoint's body could
+    # contain an equally sensitive field going forward.
+    logger.warning(
+        "Request validation failed on %s: %s",
+        request.url.path,
+        redact_validation_errors(exc.errors()),
+    )
     return JSONResponse(
         status_code=422,
         content={"success": False, "message": "Invalid request", "error": {"code": "VALIDATION_ERROR"}},

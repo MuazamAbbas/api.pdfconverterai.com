@@ -23,6 +23,11 @@ import os
 # no default for `database_url` and is evaluated at import time.
 os.environ.setdefault("DATABASE_URL", "mongodb://localhost:27017")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
+# `app.core.config.Settings.admin_jwt_secret` (new `auth` module, ADR-019
+# pending) has no default - deliberately, so a real deployment can't ever
+# silently boot with a guessable/empty JWT-signing secret. Test-only value,
+# never used outside this process.
+os.environ.setdefault("ADMIN_JWT_SECRET", "test-only-admin-jwt-secret-do-not-use-in-prod")
 
 import uuid
 from datetime import datetime
