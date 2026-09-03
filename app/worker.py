@@ -42,6 +42,7 @@ setup_logging()
 
 from arq import Retry, func  # noqa: E402
 from arq.connections import RedisSettings  # noqa: E402
+from pydantic import SecretStr  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.services.files.service import get_file_by_id, save_output_file  # noqa: E402
@@ -365,7 +366,7 @@ async def downloaders_youtube(ctx, job_id: str) -> None:
     await _run_job(ctx, job_id, DownloadersYoutubeProcessor, build_result)
 
 
-async def send_password_reset_email(ctx, email: str, reset_token: str) -> None:
+async def send_password_reset_email(ctx, email: str, reset_token: SecretStr) -> None:
     """Tier 2 dispatch behind `POST /auth/users/password-reset/request`
     (ADR-020's Tier split - that endpoint stays Tier 1/synchronous; only
     the outbound Resend HTTP call is queued here, so a slow/unavailable
@@ -389,10 +390,23 @@ async def send_password_reset_email(ctx, email: str, reset_token: str) -> None:
     Never logs `email` or `reset_token` - see
     `app/services/notification/email_service.py`'s own logging discipline
     (a reset link is itself a bearer credential).
+
+    `reset_token` is a `pydantic.SecretStr`, not a plain `str` - passed
+    that way from `app/routers/auth.py`'s `enqueue_job(...)` call
+    specifically so `arq`'s own default job-argument logging
+    (`arq.worker.Worker.run_job`, via `args_to_string()`'s `repr()` over
+    every positional job arg - logged on every job start/completion
+    regardless of what our own code logs) prints `SecretStr('**********')`
+    instead of the raw token. `SecretStr.__repr__()` provides that
+    redaction automatically; `.get_secret_value()` is only ever called
+    below, at the point the reset link is actually composed, never logged
+    or otherwise exposed. See
+    tests/test_worker_password_reset_secret_leak.py for the regression
+    test proving this against arq's real job-logging code path.
     """
     from app.services.notification.email_service import EmailSendError, send_email
 
-    reset_link = f"{settings.frontend_base_url}/reset-password?token={reset_token}"
+    reset_link = f"{settings.frontend_base_url}/reset-password?token={reset_token.get_secret_value()}"
     try:
         await send_email(email, "password_reset", {"reset_link": reset_link})
         logger.info("Password reset email dispatched")

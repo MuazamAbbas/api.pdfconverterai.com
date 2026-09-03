@@ -439,8 +439,21 @@ async def test_password_reset_request_enqueues_send_password_reset_email_job(
     enqueued = client.fake_arq_redis.enqueued
     assert len(enqueued) == 1
     args, kwargs = enqueued[0]
-    assert args == ("send_password_reset_email", _TEST_EMAIL, captured["token"])
+    assert args[:2] == ("send_password_reset_email", _TEST_EMAIL)
     assert kwargs == {}
+
+    # The raw token is now wrapped in `pydantic.SecretStr`, not handed to
+    # `enqueue_job` as a plain `str` (secret-leak fix - see
+    # tests/test_worker_password_reset_secret_leak.py for the regression
+    # test against arq's own job-argument logging, the actual leak
+    # surface). `SecretStr` still round-trips the real value via
+    # `.get_secret_value()`, but its `repr()` is redacted.
+    from pydantic import SecretStr
+
+    token_arg = args[2]
+    assert isinstance(token_arg, SecretStr)
+    assert token_arg.get_secret_value() == captured["token"]
+    assert captured["token"] not in repr(token_arg)
 
 
 async def test_password_reset_request_still_returns_200_when_enqueue_job_raises(
