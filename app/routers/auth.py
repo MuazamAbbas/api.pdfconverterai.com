@@ -31,6 +31,7 @@ import logging
 import secrets
 
 from fastapi import APIRouter, Request, Response
+from pydantic import SecretStr
 
 from app.core.admin_auth import ADMIN_COOKIE_NAME
 from app.core.config import settings
@@ -231,8 +232,16 @@ async def request_password_reset(request: Request, body: PasswordResetRequestReq
 
     if raw_token is not None:
         try:
+            # Wrapped in SecretStr (not a plain str) so that arq's own
+            # default job-argument logging (`arq.worker.Worker.run_job`,
+            # via `args_to_string`'s `repr()` over every positional arg)
+            # logs `SecretStr('**********')` instead of the raw token -
+            # see app/worker.py::send_password_reset_email's docstring and
+            # tests/test_worker_password_reset_secret_leak.py for the
+            # regression this closes. Our own code never logged this value
+            # either way; the leak was entirely from arq's internals.
             await request.app.state.arq_redis.enqueue_job(
-                "send_password_reset_email", body.email, raw_token
+                "send_password_reset_email", body.email, SecretStr(raw_token)
             )
             logger.info("Enqueued password-reset email job")
         except Exception as e:
