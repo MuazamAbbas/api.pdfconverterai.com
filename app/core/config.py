@@ -74,6 +74,59 @@ class Settings(BaseSettings):
     admin_login_max_attempts: int = 5
     admin_login_lockout_minutes: int = 15
 
+    # Public User Auth (ADR-020, approved) - a second, structurally isolated
+    # identity surface inside the same `auth` module. Mirrors every
+    # admin_jwt_*/admin_login_* setting above field-for-field (own secret,
+    # own algorithm/expiry, own lockout thresholds) per ADR-020's five-
+    # boundary isolation table - never share a setting between the two.
+    #
+    # No default, same fail-closed reasoning as admin_jwt_secret: an empty/
+    # guessable secret here would let anyone forge a valid *public user*
+    # session token, for a much larger internet-facing user base than the
+    # admin panel. Provisioned via the VPS's .env only - never hardcoded or
+    # committed.
+    user_jwt_secret: str
+    user_jwt_algorithm: str = "HS256"
+    # Deliberately longer than admin_jwt_expires_hours' 8-12h window: that
+    # window is sized for a single admin operator's working session,
+    # whereas this is a public consumer-facing session cookie - a much
+    # shorter expiry would force ordinary site visitors to re-login far
+    # more often than a typical consumer web app for no corresponding
+    # security gain in Round 1 (ADR-020 Trade-offs already accepts no
+    # instant revocation either way, same stateless-JWT trade-off as
+    # admin). 7 days; adjust via .env, not a hardcoded architectural
+    # decision that needs its own ADR.
+    user_jwt_expires_hours: int = 168
+    # Brute-force mitigation on POST /auth/users/login - same shape as
+    # admin_login_max_attempts/admin_login_lockout_minutes above, against
+    # the separate `users` collection's failed_login_attempts/locked_until
+    # fields.
+    user_login_max_attempts: int = 5
+    user_login_lockout_minutes: int = 15
+    # How long a POST /auth/users/password-reset/request token stays valid
+    # (app/services/auth/user_service.py checks this at the application
+    # layer - see app/schemas/user.py's docstring for why this is
+    # deliberately NOT a Mongo TTL index).
+    user_password_reset_token_expires_minutes: int = 60
+    # Base URL of the v2 frontend (see docs/architecture - frontend.
+    # pdfconverterai.com, not the legacy pdfconverterai.com Laravel site),
+    # used to build the password-reset link emailed to the user
+    # (`{frontend_base_url}/reset-password?token=...`). Not a secret;
+    # override via .env if the frontend's public URL ever changes.
+    frontend_base_url: str = "https://frontend.pdfconverterai.com"
+    # Resend (ADR-020 Decision) - the `notification` module's only outbound
+    # email provider. No default for the API key, same fail-closed
+    # reasoning as user_jwt_secret/admin_jwt_secret: this is the codebase's
+    # first email-sending capability, and a missing key should fail app
+    # startup, not silently no-op or send from an unconfigured account.
+    # `resend_from_email` is not a secret (Resend requires it to be a
+    # verified sending identity on the account, provisioned alongside the
+    # key in the VPS's .env) - kept with a sensible-looking default anyway
+    # so a misconfigured/missing override fails obviously in Resend's own
+    # API response rather than silently.
+    resend_api_key: str
+    resend_from_email: str = "PDFConverterAI <noreply@pdfconverterai.com>"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

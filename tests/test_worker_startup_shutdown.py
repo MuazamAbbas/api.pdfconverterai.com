@@ -63,6 +63,12 @@ def test_worker_settings_wires_on_startup_and_on_shutdown_hooks():
     `arq.worker.Function` wrapper rather than the bare function object; unwrap
     it via `.coroutine` to confirm it still references the same task
     function.
+
+    `send_password_reset_email` (Public User Auth, ADR-020) is registered
+    last, as a plain callable like most of the others - it's the Tier 2
+    dispatch behind `POST /auth/users/password-reset/request`, see that
+    function's own docstring in `app/worker.py` for why it's registered here
+    despite not going through `_run_job`/`Processor`.
     """
     assert worker.WorkerSettings.on_startup is worker.on_startup
     assert worker.WorkerSettings.on_shutdown is worker.on_shutdown
@@ -83,12 +89,14 @@ def test_worker_settings_wires_on_startup_and_on_shutdown_hooks():
         worker.ai_content_idea_generator,
         worker.ai_social_trend_analyzer,
     ]
-    assert len(functions) == 14
+    assert len(functions) == 15
 
     downloaders_entry = functions[13]
     assert isinstance(downloaders_entry, Function)
     assert downloaders_entry.coroutine is worker.downloaders_youtube
     assert downloaders_entry.timeout_s == 600
+
+    assert functions[14] is worker.send_password_reset_email
 
     assert worker.WorkerSettings.max_tries == worker.MAX_TRIES
 
