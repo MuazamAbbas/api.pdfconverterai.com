@@ -28,6 +28,12 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
 # silently boot with a guessable/empty JWT-signing secret. Test-only value,
 # never used outside this process.
 os.environ.setdefault("ADMIN_JWT_SECRET", "test-only-admin-jwt-secret-do-not-use-in-prod")
+# `app.core.config.Settings.user_jwt_secret`/`resend_api_key` (Public User
+# Auth, ADR-020, approved) also have no default, same fail-closed reasoning
+# as ADMIN_JWT_SECRET above - test-only values, never used outside this
+# process.
+os.environ.setdefault("USER_JWT_SECRET", "test-only-user-jwt-secret-do-not-use-in-prod")
+os.environ.setdefault("RESEND_API_KEY", "test-only-resend-api-key-do-not-use-in-prod")
 
 import uuid
 from datetime import datetime

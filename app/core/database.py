@@ -114,6 +114,29 @@ async def ensure_indexes():
             partialFilterExpression={"type": "tool_grid"},
             name="homepage_sections_type_tool_grid_unique",
         )
+        # `auth` module (ADR-020) - `users` is a new collection, flagged per
+        # CLAUDE.md's "don't invent a new collection without flagging it"
+        # rule, same convention as `admin_users` above. Deliberately
+        # structurally separate from `admin_users` (ADR-020's isolation
+        # table) - never share, merge, or cross-query these two
+        # collections. Unique on email so two concurrent
+        # `POST /auth/signup` requests for the same address can't create
+        # duplicate documents (app/schemas/user.py's own
+        # find-before-insert check, once backend-builder adds it, is a
+        # TOCTOU-vulnerable first line of defense only; this index is the
+        # actual guarantee) - same reasoning as admin_users_email_unique.
+        await db.users.create_index("email", unique=True, name="users_email_unique")
+        # Deliberately NOT a TTL index. `users` documents have no natural
+        # expiry (an account should never be auto-deleted), unlike
+        # files/jobs/*_usage above. In particular, `password_reset_expires_at`
+        # is NOT TTL-indexed even though it looks like an expiry field: a
+        # TTL index deletes the whole matched document once the indexed
+        # date passes, which here would mean a forgotten/abandoned
+        # password-reset request silently deletes the user's entire
+        # account once the reset link expires. Expiry for that field is
+        # instead enforced at the application layer (reject if
+        # `password_reset_expires_at < now` when validating the token) -
+        # see app/schemas/user.py's docstring.
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")

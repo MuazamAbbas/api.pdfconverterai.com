@@ -365,6 +365,59 @@ async def downloaders_youtube(ctx, job_id: str) -> None:
     await _run_job(ctx, job_id, DownloadersYoutubeProcessor, build_result)
 
 
+async def send_password_reset_email(ctx, email: str, reset_token: str) -> None:
+    """Tier 2 dispatch behind `POST /auth/users/password-reset/request`
+    (ADR-020's Tier split - that endpoint stays Tier 1/synchronous; only
+    the outbound Resend HTTP call is queued here, so a slow/unavailable
+    Resend delays rather than blocks or fails it).
+
+    Deliberately does NOT go through `_run_job`/`Processor`
+    (`app/services/jobs/processor.py`): that pipeline's Validate/Prepare/
+    Execute/Verify/Cleanup steps and its `jobs`/`files` collection plumbing
+    (`job.fileId`, a `File` document, `GET /jobs/{id}` polling) model a
+    file-processing job. This task has no input file, and there is nothing
+    for a client to poll - `POST /auth/users/password-reset/request` always
+    returns 200 immediately regardless of outcome (this feature's
+    no-user-enumeration requirement), so no job id is ever handed back to a
+    caller in the first place. It's still registered/enqueued via the
+    exact same mechanism as every other task in this module
+    (`WorkerSettings.functions` below, `app.state.arq_redis.enqueue_job(...)`
+    from `app/routers/auth.py`) - only the file/job-document orchestration
+    is skipped as structurally inapplicable, not the ARQ registration
+    itself.
+
+    Never logs `email` or `reset_token` - see
+    `app/services/notification/email_service.py`'s own logging discipline
+    (a reset link is itself a bearer credential).
+    """
+    from app.services.notification.email_service import EmailSendError, send_email
+
+    reset_link = f"{settings.frontend_base_url}/reset-password?token={reset_token}"
+    try:
+        await send_email(email, "password_reset", {"reset_link": reset_link})
+        logger.info("Password reset email dispatched")
+    except EmailSendError as e:
+        # No `jobs` document exists for this task, so there's nothing to
+        # mark failed - a giving-up attempt just means the user doesn't
+        # receive the email (they can always issue a fresh reset request).
+        # Retries use arq's own per-task `job_try`/`Retry` mechanism
+        # directly (same backoff shape as `_run_job`'s TransientProcessingError
+        # branch) rather than the jobs-collection-backed
+        # `increment_retry_count`, since there's no job document to
+        # increment a retry count on.
+        job_try = ctx.get("job_try", 1)
+        if job_try >= MAX_TRIES:
+            logger.error(
+                "Password reset email dispatch failed after %d attempt(s): %s", job_try, str(e)
+            )
+            return
+        logger.warning(
+            "Password reset email dispatch failed, retrying (attempt %s/%s): %s",
+            job_try, MAX_TRIES, str(e),
+        )
+        raise Retry(defer=min(2**job_try, 30))
+
+
 async def on_startup(ctx: dict) -> None:
     """Runs once per ARQ worker process (Handbook Part C.2/C.7, ADR-006) -
     the worker-process analogue of `app.state` in `app/main.py`. Preloads
@@ -446,6 +499,7 @@ class WorkerSettings:
         # downloads room to finish without regressing the 5-minute budget
         # every other job type here still gets.
         func(downloaders_youtube, timeout=600),
+        send_password_reset_email,
     ]
     on_startup = on_startup
     on_shutdown = on_shutdown
