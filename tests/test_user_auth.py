@@ -384,6 +384,43 @@ async def test_user_logout_clears_cookie(client):
     assert "Max-Age=0" in set_cookie
 
 
+# --- GET /v1/auth/users/me -------------------------------------------------
+
+
+async def test_get_current_user_valid_cookie_returns_email(client, seeded_user):
+    # Set the cookie directly (rather than chaining off POST .../login's
+    # Set-Cookie header) - that header carries `Secure`, which httpx's
+    # cookie jar won't persist/replay over this test client's plain-http
+    # `base_url` ("http://test"), same non-issue in production where the
+    # site is always served over real HTTPS. `create_user_access_token` is
+    # the exact same token-minting path the login route itself calls.
+    token = create_user_access_token(_TEST_EMAIL)
+    client.cookies.set(USER_COOKIE_NAME, token)
+
+    resp = await client.get("/v1/auth/users/me")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["data"]["email"] == _TEST_EMAIL
+
+
+async def test_get_current_user_missing_cookie_returns_401_auth_required(client):
+    resp = await client.get("/v1/auth/users/me")
+    assert resp.status_code == 401
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "USER_AUTH_REQUIRED"
+
+
+async def test_get_current_user_invalid_cookie_returns_401_auth_invalid(client):
+    client.cookies.set(USER_COOKIE_NAME, "not-a-real-token-at-all")
+    resp = await client.get("/v1/auth/users/me")
+    assert resp.status_code == 401
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "USER_AUTH_INVALID"
+
+
 # --- admin/user routes never collide, and admin cookie clearing doesn't
 # touch the user cookie or vice versa -------------------------------------
 

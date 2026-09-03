@@ -30,13 +30,13 @@ convention.
 import logging
 import secrets
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import SecretStr
 
 from app.core.admin_auth import ADMIN_COOKIE_NAME
 from app.core.config import settings
 from app.core.rate_limiter import limiter
-from app.core.user_auth import USER_COOKIE_NAME
+from app.core.user_auth import USER_COOKIE_NAME, require_user
 from app.schemas.auth import (
     AdminLoginRequest,
     PasswordResetConfirmRequest,
@@ -212,6 +212,19 @@ async def user_logout(response: Response):
     response.delete_cookie(key=USER_COOKIE_NAME, path="/", samesite="strict", secure=True, httponly=True)
     logger.info("User logout, session cookie cleared")
     return envelope(True, "Logged out", data=None)
+
+
+@router.get("/users/me", summary="Get the current authenticated user's session info")
+async def get_current_user(current_user: dict = Depends(require_user)):
+    """Reads the caller's `user_session` cookie via `require_user` (no new
+    verification logic here - this route only exists to expose that
+    dependency's result over HTTP). `require_user` itself already raises the
+    correct 401 (`USER_AUTH_REQUIRED` if the cookie is missing,
+    `USER_AUTH_INVALID` if present but invalid/expired) before this
+    function body ever runs, so there's nothing to catch here. Lets the
+    frontend site header show logged-in state without needing to decode the
+    JWT client-side."""
+    return envelope(True, "Authenticated", data={"email": current_user["email"]})
 
 
 @router.post(
