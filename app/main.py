@@ -30,6 +30,7 @@ from app.routers import (  # noqa: E402
     binary_tools,
     calculators,
     categories,
+    content,
     cyber_security,
     downloaders,
     files,
@@ -129,6 +130,15 @@ app.include_router(auth.router, prefix="/v1", tags=["Auth"])
 # (ADR-008 Secure by Default) rather than relying on either alone.
 app.include_router(admin.public_router, prefix="/v1", tags=["Admin"])
 app.include_router(admin.router, prefix="/v1", tags=["Admin"], dependencies=protected_dependency)
+# `content` (ADR-021, Content Model Foundation) - new module, sibling to
+# `admin`, same two-router split for the same reason (see
+# app/routers/content.py's module docstring). `content.public_router` is
+# the unauthenticated GET /v1/content/categories + GET /v1/content/tags
+# reads; `content.router` is every admin-write route (create/update/
+# delete/reorder categories) and gets `protected_dependency` here exactly
+# like `admin.router`, plus its own `Depends(require_admin)` per route.
+app.include_router(content.public_router, prefix="/v1", tags=["Content"])
+app.include_router(content.router, prefix="/v1", tags=["Content"], dependencies=protected_dependency)
 app.include_router(ai_tools.router, prefix="/v1", tags=["AI Tools"], dependencies=protected_dependency)
 app.include_router(seo_tools.router, prefix="/v1", tags=["SEO Tools"], dependencies=protected_dependency)
 app.include_router(web_tools.router, prefix="/v1", tags=["Web Tools"], dependencies=protected_dependency)

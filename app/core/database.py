@@ -137,6 +137,42 @@ async def ensure_indexes():
         # instead enforced at the application layer (reject if
         # `password_reset_expires_at < now` when validating the token) -
         # see app/schemas/user.py's docstring.
+        # `content` module (ADR-021) - `content_categories` is a new
+        # collection, flagged per CLAUDE.md's "don't invent a new
+        # collection without flagging it" rule, same convention as
+        # `admin_users`/`homepage_sections` above. Full indexing/uniqueness
+        # reasoning lives in app/schemas/content_category.py's module
+        # docstring; summary:
+        #   - `slug` unique across BOTH content_type values (not partial) -
+        #     doubles as the DB-layer backstop against a duplicate
+        #     tool_metadata row ever being inserted twice (e.g. a re-run of
+        #     seed_content_categories.py), the same insurance role
+        #     homepage_sections_type_tool_grid_unique plays for tool_grid.
+        #   - `order` indexed (non-unique) - backs the sorted list queries
+        #     for both content types. NOT compounded with `content_type`,
+        #     same reasoning as homepage_sections_order (tiny collection,
+        #     full scan already sub-millisecond).
+        #   - No DB-layer backstop exists for the edit/delete read-only
+        #     constraint on tool_metadata rows themselves (MongoDB Community
+        #     has no per-document conditional write-block mechanism) - that
+        #     invariant is application-layer only, enforced in
+        #     app/services/content/categories_service.py.
+        # No TTL index: structural taxonomy data, no natural expiry.
+        await db.content_categories.create_index(
+            "slug", unique=True, name="content_categories_slug_unique"
+        )
+        await db.content_categories.create_index("order", name="content_categories_order")
+        # `content` module (ADR-021) - `tags` is a new collection, same
+        # flagging convention as `content_categories` above. Unique on
+        # `slug` so two concurrent `get_or_create_tag` calls normalizing the
+        # same raw string (e.g. "SEO" and "seo") can't create duplicate
+        # documents (app/services/content/tags_service.py's own
+        # find-before-upsert check is a TOCTOU-vulnerable first line of
+        # defense only; this index is the actual guarantee) - same
+        # reasoning as admin_users_email_unique/users_email_unique. No TTL
+        # index: tags are not transient processing/upload metadata and have
+        # no natural expiry.
+        await db.tags.create_index("slug", unique=True, name="tags_slug_unique")
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")
