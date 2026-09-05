@@ -173,6 +173,27 @@ async def ensure_indexes():
         # index: tags are not transient processing/upload metadata and have
         # no natural expiry.
         await db.tags.create_index("slug", unique=True, name="tags_slug_unique")
+        # `content` module (ADR-021 foundation, Tools Metadata CMS feature
+        # spec approved 2026-09-04) - `content_tool_metadata` is a new
+        # collection, same flagging convention as `content_categories`/
+        # `tags` above. Full indexing/uniqueness reasoning lives in
+        # app/schemas/content_tool_metadata.py's module docstring; summary:
+        #   - `slug` unique - the primary lookup key for
+        #     GET /v1/content/tool-metadata/{slug}, and doubles as the
+        #     DB-layer backstop against a duplicate-slug create ever
+        #     succeeding (same insurance role content_categories_slug_unique/
+        #     tags_slug_unique play for their own collections).
+        #   - No `category` index: at most ~57 documents will ever exist
+        #     (one per tools-registry.ts tool), and no planned query filters
+        #     this collection by category - the public read path is always a
+        #     single find_one({"slug": ...}) by the unique key above. Same
+        #     "tiny collection, index only what's actually queried"
+        #     reasoning as content_categories_order/homepage_sections_order.
+        # No TTL index: structural per-tool marketing content, no natural
+        # expiry.
+        await db.content_tool_metadata.create_index(
+            "slug", unique=True, name="content_tool_metadata_slug_unique"
+        )
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")
