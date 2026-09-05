@@ -136,6 +136,38 @@ async def test_create_admin_user_rejects_duplicate_email(seeded_admin):
     assert admin_doc["_id"] == seeded_admin.id
 
 
+async def test_reset_admin_password_rejects_unknown_email():
+    with pytest.raises(ValueError):
+        await admin_user_service.reset_admin_password(
+            email="no-such-admin-for-reset-test@pdfconverterai.com",
+            password_hash=hash_password("irrelevant"),
+        )
+
+
+async def test_reset_admin_password_updates_hash_and_clears_lockout(seeded_admin):
+    # Simulate a prior lockout that a stale value would otherwise silently
+    # defeat the new password against (the exact bug reset_admin_password's
+    # docstring says it prevents).
+    await db.admin_users.update_one(
+        {"_id": seeded_admin.id},
+        {"$set": {"failed_login_attempts": 5, "locked_until": datetime.utcnow() + timedelta(minutes=15)}},
+    )
+
+    new_hash = hash_password("a-different-strong-password-456")
+    updated = await admin_user_service.reset_admin_password(
+        email=_TEST_EMAIL, password_hash=new_hash, operator="test-operator"
+    )
+
+    assert updated.password_hash == new_hash
+    assert updated.failed_login_attempts == 0
+    assert updated.locked_until is None
+
+    admin_doc = await db.admin_users.find_one({"_id": seeded_admin.id})
+    assert admin_doc["password_hash"] == new_hash
+    assert admin_doc["failed_login_attempts"] == 0
+    assert admin_doc["locked_until"] is None
+
+
 # --- password_service -------------------------------------------------
 
 

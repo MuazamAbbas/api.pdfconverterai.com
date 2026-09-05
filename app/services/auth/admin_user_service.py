@@ -5,7 +5,9 @@ Owns every read/write against `db.admin_users`, mirroring
 (Handbook Part C.3). No public signup route exists anywhere - the only
 writer is `backend/scripts/seed_admin.py`. `app/routers/auth.py` (login)
 only reads/updates the lockout fields on an existing document; it never
-inserts one.
+inserts one. `backend/scripts/reset_admin_password.py` is the only writer
+for an out-of-band password reset (no `/auth/forgot-password` route exists
+for admin accounts, by design - see that script's docstring).
 """
 import logging
 from datetime import datetime, timedelta
@@ -83,3 +85,44 @@ async def reset_failed_login(email: str) -> None:
         {"email": normalized},
         {"$set": {"failed_login_attempts": 0, "locked_until": None}},
     )
+
+
+async def reset_admin_password(
+    email: str, password_hash: str, operator: Optional[str] = None
+) -> AdminUserDocument:
+    """Used only by `backend/scripts/reset_admin_password.py` - an operator-run,
+    out-of-band recovery path (mirrors `create_admin_user`'s "script is the
+    only writer" pattern). Also clears any lockout state, since a stale
+    `locked_until` would otherwise silently defeat the new password.
+
+    Must never be called from a network-reachable path: unlike
+    `attempt_login`/`register_failed_login`, the "no such email" branch below
+    raises immediately with no constant-time/dummy-hash guard, so it is a
+    user-enumeration oracle if ever wired behind an HTTP route.
+
+    `operator` (typically `getpass.getuser()` from the calling script) is
+    logged alongside the account id so an app-log line ties this sensitive,
+    unauthenticated-by-design action back to *who* ran it - the trust model
+    here is "VPS shell access is the authentication," so this is a
+    correlation aid for that shell/auth trail, not an access control."""
+    normalized = _normalize_email(email)
+    existing = await db.admin_users.find_one({"email": normalized})
+    if existing is None:
+        raise ValueError(f"No admin_users document exists for {normalized}")
+    await db.admin_users.update_one(
+        {"_id": existing["_id"]},
+        {
+            "$set": {
+                "password_hash": password_hash,
+                "failed_login_attempts": 0,
+                "locked_until": None,
+            }
+        },
+    )
+    logger.info(
+        "Reset password_hash and cleared lockout for admin_users id=%s (operator=%s)",
+        existing["_id"],
+        operator or "unknown",
+    )
+    doc = await db.admin_users.find_one({"_id": existing["_id"]})
+    return AdminUserDocument(**doc)
