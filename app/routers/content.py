@@ -14,12 +14,44 @@ Also carries the Tools Metadata CMS routes (feature spec approved
 same `/content` prefix, same two-router split - not a new module or a new
 router registration.
 
-All service logic (Mongo reads/writes, the `content_type='tool_metadata'`
-read-only invariant, reorder renumbering, tag normalize-and-upsert,
-tool-metadata category/tag validation) lives in
+Also carries the Blog/News CMS routes (direct extension of the Tools
+Metadata CMS, same feature family, ADR-021's foundation): public
+`GET /v1/content/blog-posts` (paginated, published-only) and
+`GET /v1/content/blog-posts/{slug}`, and admin
+`POST /v1/content/blog-posts`, `GET /v1/content/admin/blog-posts`,
+`GET /v1/content/admin/blog-posts/{slug}`,
+`PUT/DELETE /v1/content/blog-posts/{slug}`, backed by
+`app/services/content/blog_posts_service.py`. Same `content` module, same
+`/content` prefix, same two-router split, no new router registration -
+`app/main.py` already mounts both `public_router` and `router` at `/v1`,
+adding routes to the same `APIRouter` instances needs no further wiring
+there. The blog list routes are this codebase's first consumers of
+`app/shared/pagination.py`'s `PaginationParams`/`paginated_envelope` - see
+that module's docstring for why it's written generically rather than
+blog-specific.
+
+Note the asymmetry: the two admin GET routes live under `/admin/blog-posts`
+(not bare `/blog-posts`), but the admin POST/PUT/DELETE routes stay at bare
+`/blog-posts`/`/blog-posts/{slug}`. This is deliberate, not a leftover bug -
+`public_router` and `router` are both mounted at the same `/v1` prefix in
+`app/main.py`, and Starlette matches routes in flat registration order, so
+an admin GET at the exact same (path, method) as a public GET would always
+be shadowed by the public handler (see the incident this fixed: both admin
+blog-post GET handlers were permanently dead code, admin drafts/edit-by-slug
+were unreachable). POST/PUT/DELETE never had this problem because
+`public_router` has no POST/PUT/DELETE at these paths to collide with, so
+those three stay at the simpler bare path. Do NOT "clean this up" by moving
+the admin GETs back to bare `/blog-posts` or by moving the public routes -
+either change reintroduces the collision.
+
+All service logic (Mongo reads/writes, the `content_type='tool_metadata'`/
+`content_type='blog'` read-only-vs-mutable invariants, reorder renumbering,
+tag normalize-and-upsert, tool-metadata/blog-post category/tag validation,
+`published_at` stamping) lives in
 `app/services/content/categories_service.py`,
-`app/services/content/tags_service.py`, and
-`app/services/content/tool_metadata_service.py`; this file only does HTTP
+`app/services/content/tags_service.py`,
+`app/services/content/tool_metadata_service.py`, and
+`app/services/content/blog_posts_service.py`; this file only does HTTP
 concerns - request/response shaping, auth wiring, and translating
 service-layer exceptions into `app.shared.responses.api_error(...)`. Same
 division of responsibility `app/routers/admin.py` documents for
@@ -48,12 +80,32 @@ There is deliberately no direct CRUD route for `tags` here - see
 is `get_or_create_tag`, called by the Tools Metadata CMS / future Blog CMS
 routers when they attach tags to a content item, never by an admin typing a
 tag directly through this API.
+
+**Rate limiting on the two public blog-post routes** (`security-reviewer`
+finding, Blog/News CMS review): `public_router` is registered in `main.py`
+without `protected_dependency`, so none of this router's routes get rate
+limiting by default - true for `categories`/`tags`/`tool-metadata` here too,
+an inherited gap not introduced by this task. The two blog-post routes are
+given their own explicit `@limiter.limit(...)` anyway (not extended to the
+older sibling routes, which stays a separate follow-up) because they are a
+materially larger new attack surface than those siblings: `page_size` up to
+50 x `body` up to 50,000 chars means a single unauthenticated list request
+can pull several MB, versus the siblings' small, bounded payloads. `30/minute`
+on the list route, `60/minute` on the single-post route (smaller payload,
+matches typical read patterns like a page linking to several posts).
 """
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.core.admin_auth import require_admin
+from app.core.rate_limiter import limiter
+from app.schemas.content_blog_post import (
+    BlogPostStatus,
+    ContentBlogPostCreate,
+    ContentBlogPostUpdate,
+)
 from app.schemas.content_category import (
     ContentCategoryCreate,
     ContentCategoryReorderRequest,
@@ -64,6 +116,18 @@ from app.schemas.content_tool_metadata import (
     ContentToolMetadataCreate,
     ContentToolMetadataUpdate,
 )
+from app.services.content.blog_posts_service import (
+    BlogPostNotFound,
+    BlogPostSlugConflict,
+    create_post,
+    delete_post,
+    list_posts,
+    update_post,
+)
+from app.services.content.blog_posts_service import (
+    InvalidCategory as BlogPostInvalidCategory,
+)
+from app.services.content.blog_posts_service import get_by_slug as get_blog_post_by_slug
 from app.services.content.categories_service import (
     CategoryNotFound,
     CategoryReadOnly,
@@ -85,6 +149,7 @@ from app.services.content.tool_metadata_service import (
     list_all,
     update_tool_metadata,
 )
+from app.shared.pagination import PaginationParams, paginated_envelope
 from app.shared.responses import api_error, envelope
 
 logger = logging.getLogger(__name__)
@@ -134,6 +199,24 @@ def _tool_metadata_out(tool_metadata) -> dict:
     }
 
 
+def _blog_post_out(post) -> dict:
+    return {
+        "id": str(post.id),
+        "slug": post.slug,
+        "title": post.title,
+        "category": post.category,
+        "tags": post.tags,
+        "excerpt": post.excerpt,
+        "body": post.body,
+        "cover_image_url": post.cover_image_url,
+        "status": post.status.value,
+        "ad_slot": post.ad_slot.model_dump() if post.ad_slot is not None else None,
+        "published_at": post.published_at.isoformat() if post.published_at is not None else None,
+        "created_at": post.created_at.isoformat(),
+        "updated_at": post.updated_at.isoformat(),
+    }
+
+
 @public_router.get(
     "/categories",
     summary="Public: list content categories, optionally filtered by content_type",
@@ -170,6 +253,47 @@ async def get_public_tool_metadata(slug: str):
         raise api_error(404, "Tool metadata not found", "TOOL_METADATA_NOT_FOUND") from exc
     logger.debug("Retrieved content_tool_metadata for slug=%s", slug)
     return envelope(True, "Tool metadata retrieved", data=_tool_metadata_out(tool_metadata))
+
+
+@public_router.get(
+    "/blog-posts",
+    summary="Public: list published blog posts, newest first (paginated)",
+)
+@limiter.limit("30/minute")
+async def get_public_blog_posts(request: Request, pagination: PaginationParams = Depends()):
+    posts, total = await list_posts(pagination=pagination, status_filter=BlogPostStatus.PUBLISHED)
+    logger.debug(
+        "Listed %d published content_blog_posts (page=%d, page_size=%d, total=%d)",
+        len(posts),
+        pagination.page,
+        pagination.page_size,
+        total,
+    )
+    return envelope(
+        True,
+        "Blog posts retrieved",
+        data=paginated_envelope([_blog_post_out(p) for p in posts], total, pagination),
+    )
+
+
+@public_router.get(
+    "/blog-posts/{slug}",
+    summary="Public: fetch one published blog post by slug",
+)
+@limiter.limit("60/minute")
+async def get_public_blog_post(request: Request, slug: str):
+    try:
+        post = await get_blog_post_by_slug(slug, include_drafts=False)
+    except BlogPostNotFound as exc:
+        # Expected/normal: a missing slug or an existing-but-draft slug must
+        # look identical from the public route's perspective (see
+        # blog_posts_service.py's module docstring) - debug only, never
+        # warning/error, same convention get_public_tool_metadata uses for
+        # its own expected-miss case.
+        logger.debug("No published content_blog_posts row for slug=%s: %s", slug, exc)
+        raise api_error(404, "Blog post not found", "BLOG_POST_NOT_FOUND") from exc
+    logger.debug("Retrieved content_blog_posts for slug=%s", slug)
+    return envelope(True, "Blog post retrieved", data=_blog_post_out(post))
 
 
 @router.post(
@@ -311,3 +435,91 @@ async def delete_admin_tool_metadata(slug: str, admin: dict = Depends(require_ad
         raise api_error(404, "Tool metadata not found", "TOOL_METADATA_NOT_FOUND") from exc
     logger.info("Admin %s deleted content_tool_metadata slug=%s", admin.get("email"), slug)
     return envelope(True, "Tool metadata deleted", data=None)
+
+
+@router.post(
+    "/blog-posts",
+    summary="Admin: create a blog post (draft by default; born-published if status='published')",
+)
+async def create_admin_blog_post(body: ContentBlogPostCreate, admin: dict = Depends(require_admin)):
+    try:
+        post = await create_post(body)
+    except BlogPostInvalidCategory as exc:
+        logger.warning("Create rejected, invalid category for admin %s: %s", admin.get("email"), exc)
+        raise api_error(400, "category must be an existing blog content category", "INVALID_CATEGORY") from exc
+    except BlogPostSlugConflict as exc:
+        logger.warning("Create rejected, duplicate slug for admin %s: %s", admin.get("email"), exc)
+        raise api_error(409, "A blog post with this slug already exists", "BLOG_POST_SLUG_CONFLICT") from exc
+    logger.info("Admin %s created content_blog_posts %s (slug=%s)", admin.get("email"), post.id, post.slug)
+    return envelope(True, "Blog post created", data=_blog_post_out(post))
+
+
+@router.get(
+    "/admin/blog-posts",
+    summary="Admin: list blog posts (all statuses by default, or filtered by ?status=)",
+)
+async def list_admin_blog_posts(
+    status: Optional[BlogPostStatus] = None,
+    pagination: PaginationParams = Depends(),
+    admin: dict = Depends(require_admin),
+):
+    posts, total = await list_posts(pagination=pagination, status_filter=status)
+    logger.info(
+        "Admin %s listed %d content_blog_posts rows (status=%s, page=%d, page_size=%d, total=%d)",
+        admin.get("email"),
+        len(posts),
+        status,
+        pagination.page,
+        pagination.page_size,
+        total,
+    )
+    return envelope(
+        True,
+        "Blog posts retrieved",
+        data=paginated_envelope([_blog_post_out(p) for p in posts], total, pagination),
+    )
+
+
+@router.get(
+    "/admin/blog-posts/{slug}",
+    summary="Admin: fetch one blog post by slug, including drafts (for populating an edit form)",
+)
+async def get_admin_blog_post(slug: str, admin: dict = Depends(require_admin)):
+    try:
+        post = await get_blog_post_by_slug(slug, include_drafts=True)
+    except BlogPostNotFound as exc:
+        logger.warning("Fetch failed, blog post not found: %s", slug)
+        raise api_error(404, "Blog post not found", "BLOG_POST_NOT_FOUND") from exc
+    logger.info("Admin %s retrieved content_blog_posts slug=%s", admin.get("email"), slug)
+    return envelope(True, "Blog post retrieved", data=_blog_post_out(post))
+
+
+@router.put(
+    "/blog-posts/{slug}",
+    summary="Admin: edit a blog post (slug is immutable; published_at is stamped server-side)",
+)
+async def update_admin_blog_post(slug: str, body: ContentBlogPostUpdate, admin: dict = Depends(require_admin)):
+    try:
+        post = await update_post(slug, body)
+    except BlogPostNotFound as exc:
+        logger.warning("Update failed, blog post not found: %s", slug)
+        raise api_error(404, "Blog post not found", "BLOG_POST_NOT_FOUND") from exc
+    except BlogPostInvalidCategory as exc:
+        logger.warning("Update rejected, invalid category for slug=%s: %s", slug, exc)
+        raise api_error(400, "category must be an existing blog content category", "INVALID_CATEGORY") from exc
+    logger.info("Admin %s updated content_blog_posts slug=%s", admin.get("email"), slug)
+    return envelope(True, "Blog post updated", data=_blog_post_out(post))
+
+
+@router.delete(
+    "/blog-posts/{slug}",
+    summary="Admin: delete a blog post",
+)
+async def delete_admin_blog_post(slug: str, admin: dict = Depends(require_admin)):
+    try:
+        await delete_post(slug)
+    except BlogPostNotFound as exc:
+        logger.warning("Delete failed, blog post not found: %s", slug)
+        raise api_error(404, "Blog post not found", "BLOG_POST_NOT_FOUND") from exc
+    logger.info("Admin %s deleted content_blog_posts slug=%s", admin.get("email"), slug)
+    return envelope(True, "Blog post deleted", data=None)
