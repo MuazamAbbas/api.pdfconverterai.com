@@ -194,6 +194,41 @@ async def ensure_indexes():
         await db.content_tool_metadata.create_index(
             "slug", unique=True, name="content_tool_metadata_slug_unique"
         )
+        # `content` module (ADR-021 foundation, Blog/News CMS - direct
+        # extension of the just-shipped Tools Metadata CMS above) -
+        # `content_blog_posts` is a new collection, same flagging convention
+        # as `content_categories`/`tags`/`content_tool_metadata` above. Full
+        # indexing/uniqueness reasoning lives in
+        # app/schemas/content_blog_post.py's module docstring; summary:
+        #   - `slug` unique - the primary lookup key for
+        #     GET /v1/content/blog-posts/{slug}, and doubles as the DB-layer
+        #     backstop against a duplicate-slug create ever succeeding (same
+        #     insurance role content_categories_slug_unique/tags_slug_unique/
+        #     content_tool_metadata_slug_unique play for their own
+        #     collections).
+        #   - `(status, published_at)` compound index, DESCENDING on
+        #     published_at: unlike every sibling collection in this feature
+        #     family (all bounded - content_categories ~10-20 rows,
+        #     content_tool_metadata capped at the tool count ~57), this is
+        #     the first collection here expected to grow unboundedly over
+        #     the site's editorial lifetime. It directly serves the public
+        #     blog index's real query shape -
+        #     find({"status": "published"}).sort("published_at", -1) with
+        #     pagination - rather than relying on the "tiny collection, full
+        #     scan is sub-millisecond" reasoning the siblings correctly use.
+        #     This is a deliberate, proactive divergence from this feature
+        #     family's usual "index only what's actually queried, skip it on
+        #     small collections" default - see the schema docstring for the
+        #     full contrast against content_tool_metadata's opposite call.
+        # No TTL index: structural editorial content, no natural expiry -
+        # same as every sibling collection in this feature family.
+        await db.content_blog_posts.create_index(
+            "slug", unique=True, name="content_blog_posts_slug_unique"
+        )
+        await db.content_blog_posts.create_index(
+            [("status", 1), ("published_at", -1)],
+            name="content_blog_posts_status_published_at",
+        )
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")
