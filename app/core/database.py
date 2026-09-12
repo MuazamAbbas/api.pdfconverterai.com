@@ -229,6 +229,42 @@ async def ensure_indexes():
             [("status", 1), ("published_at", -1)],
             name="content_blog_posts_status_published_at",
         )
+        # `content` module (ADR-021 foundation, ADR-022 - Dynamic Pages
+        # builder, task #48) - `content_pages` is a new collection, same
+        # flagging convention as `content_categories`/`tags`/
+        # `content_tool_metadata`/`content_blog_posts` above. Full
+        # indexing/uniqueness reasoning lives in
+        # app/schemas/content_page.py's module docstring; summary:
+        #   - `slug` unique - the primary lookup key for
+        #     GET /v1/content/pages/{slug}, and doubles as the DB-layer
+        #     backstop against a duplicate-slug create ever succeeding (same
+        #     insurance role content_categories_slug_unique/tags_slug_unique/
+        #     content_tool_metadata_slug_unique/
+        #     content_blog_posts_slug_unique play for their own
+        #     collections).
+        #   - Deliberately NO `(status, published_at)` compound index, unlike
+        #     content_blog_posts: the public read path here is a single
+        #     find_one({"slug": ..., "status": "published"}) already served
+        #     by the slug unique index (a point lookup - the status check on
+        #     the one fetched document is free), and nothing in the approved
+        #     spec has the admin list route filtering/sorting by status or
+        #     published_at at all (it lists ALL pages, drafts included, full
+        #     stop) - there is no sorted/filtered/paginated query this
+        #     collection actually serves that such an index would help,
+        #     unlike content_blog_posts's real
+        #     find({"status": "published"}).sort("published_at", -1)
+        #     pagination query. Closer to content_tool_metadata's "tiny,
+        #     bounded collection, index only what's actually queried"
+        #     reasoning than to content_blog_posts's proactive case - see the
+        #     schema docstring for the honest caveat on why this assumption
+        #     could stop holding (no hard cap enforced anywhere on this
+        #     collection, unlike content_tool_metadata's natural cap at the
+        #     tool count).
+        # No TTL index: structural editorial content, no natural expiry -
+        # same as every sibling collection in this feature family.
+        await db.content_pages.create_index(
+            "slug", unique=True, name="content_pages_slug_unique"
+        )
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")

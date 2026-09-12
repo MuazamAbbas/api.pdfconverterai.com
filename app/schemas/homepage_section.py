@@ -88,8 +88,9 @@ admin-editable in place.
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.common import PyObjectId
 
@@ -102,12 +103,45 @@ class SectionType(str, Enum):
 
 
 class BannerLink(BaseModel):
-    """Optional call-to-action link inside a banner section."""
+    """Optional call-to-action link inside a banner section.
+
+    Shared by two consumers: the homepage's own `banner` section, and (via
+    reuse - see `content_page.py`'s module docstring) the Dynamic Pages
+    builder's `cta_banner` block. Fixing `href` validation once here closes
+    the gap for both current and future consumers, rather than each one
+    inventing its own check.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(..., min_length=1, max_length=100)
     href: str = Field(..., min_length=1, max_length=2048)
+
+    @field_validator("href")
+    @classmethod
+    def _validate_href_scheme(cls, value: str) -> str:
+        # Backend port of frontend/lib/homepage-sections.ts's
+        # sanitizeBannerHref() - same rule, same reasoning: accept either
+        # (a) a site-relative path starting with a single "/" (not "//",
+        # which is protocol-relative and browser-resolves to an arbitrary
+        # external host), or (b) an absolute http:/https: URL. Reject
+        # everything else, including javascript:/data:/vbscript: and bare
+        # relative paths with no leading slash. Security-reviewer finding
+        # (Dynamic Pages builder review): this field had zero scheme
+        # validation, unlike this feature family's other admin-authored URL
+        # fields (ImageContent.url, ContentBlogPostBase.cover_image_url) -
+        # this closes that gap for every current and future consumer of
+        # BannerLink, not just the one that surfaced it.
+        trimmed = value.strip()
+        if trimmed.startswith("/") and not trimmed.startswith("//"):
+            return value
+        parsed = urlparse(trimmed)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            return value
+        raise ValueError(
+            f"href {value!r} must be a site-relative path starting with a single '/' "
+            "or an absolute http:// or https:// URL - no other scheme is accepted"
+        )
 
 
 class HeroContent(BaseModel):
