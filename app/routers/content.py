@@ -118,14 +118,17 @@ is no collision to work around here since every admin page route already
 lives under the `/admin/pages` prefix, and matching blog's asymmetry would
 only reintroduce inconsistency for no benefit.
 
-No new `@limiter.limit(...)` on the public pages route, unlike the two
-public blog-post routes - this collection's payloads are small and bounded
-(a page's `blocks` list is capped by each block's own field limits, e.g.
-`RichTextContent.body`'s `max_length=50000` per block, not an unbounded
-`page_size x body` product the way blog's paginated list is), so it doesn't
-carry the same "materially larger new attack surface" justification the
-blog-post rate limits document above. Noted here so `security-reviewer`
-doesn't have to re-derive why pages didn't get the same treatment blog did.
+**Update (security-reviewer finding, Dynamic Pages builder review):** the
+public page route DOES now carry its own `@limiter.limit("60/minute")`,
+matching `get_public_blog_post`'s exact rate/reasoning. The original version
+of this paragraph argued no rate limit was needed because a page's `blocks`
+list was unbounded in length (only each block's own field limits, e.g.
+`RichTextContent.body`'s `max_length=50000`, capped a single block) - that
+reasoning no longer holds now that `ContentPageBase.blocks` also carries an
+explicit `max_length=50` (see `content_page.py`), but the rate limit was
+added anyway, belt-and-suspenders, since an unauthenticated route serving a
+single-document response with no request cost is still worth bounding
+regardless of how tightly the response size itself is capped.
 """
 import logging
 from typing import Optional
@@ -358,7 +361,8 @@ async def get_public_blog_post(request: Request, slug: str):
     "/pages/{slug}",
     summary="Public: fetch one published dynamic page by slug",
 )
-async def get_public_page(slug: str):
+@limiter.limit("60/minute")
+async def get_public_page(request: Request, slug: str):
     try:
         page = await get_page_by_slug(slug, include_drafts=False)
     except PageNotFound as exc:

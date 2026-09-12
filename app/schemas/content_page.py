@@ -402,6 +402,18 @@ class PageBlock(BaseModel):
 # `layout.tsx`/`layout.test.tsx`/`page.tsx`/`page.test.tsx` are not routes
 # (global layout/root page/test files, not folder-based route segments) and
 # are correctly excluded.
+#
+# Cosmetic note (security-reviewer, Dynamic Pages builder review):
+# `favicon.ico`/`robots.txt`/`sitemap.xml` contain a literal "." and can
+# therefore never actually match `_SLUG_RE` (lowercase-hyphen-only, no
+# dots) - a create attempt at one of these exact strings is already
+# rejected by the schema-layer slug-format validator before the
+# service-layer SlugReserved check (content_pages_service.py) is ever
+# reached. Still blocked either way, just via a different, less-specific
+# error - not a vulnerability, just means these three are unreachable via
+# the SlugReserved code path specifically. Left in the set anyway since it
+# remains the canonical, documented list of every reserved name per
+# ADR-022, regardless of which validator ends up rejecting it first.
 RESERVED_TOP_LEVEL_SLUGS: frozenset[str] = frozenset(
     {
         "admin",
@@ -450,9 +462,16 @@ class ContentPageBase(BaseModel):
     blocks: list[PageBlock] = Field(
         ...,
         min_length=1,
+        max_length=50,
         description=(
             "Ordered list of typed content blocks. A page with zero blocks "
-            "isn't a real page - see module docstring."
+            "isn't a real page - see module docstring. Capped at 50 - same "
+            "bound-by-round-number convention as content_blog_post's "
+            "page_size cap of 50 - a security-reviewer finding (Dynamic "
+            "Pages builder review): an unbounded list, each block up to "
+            "~50KB for rich_text, could produce an arbitrarily large single "
+            "document served unauthenticated by the public route with no "
+            "size ceiling otherwise."
         ),
     )
     status: PageStatus = Field(
@@ -524,7 +543,7 @@ class ContentPageUpdate(BaseModel):
 
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     meta_description: Optional[str] = Field(default=None, min_length=1, max_length=500)
-    blocks: Optional[list[PageBlock]] = Field(default=None, min_length=1)
+    blocks: Optional[list[PageBlock]] = Field(default=None, min_length=1, max_length=50)
     status: Optional[PageStatus] = None
 
 

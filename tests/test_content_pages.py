@@ -3,18 +3,18 @@ module, ADR-022: Dynamic CMS Pages - content-block model and route-collision
 handling - see `app/schemas/content_page.py`'s module docstring for full
 feature background).
 
-Mirrors `tests/test_content_tool_metadata.py`'s harness pattern exactly
-(same reasons documented there: `app.main` isn't importable in this
-checkout, so this file builds its own tiny `FastAPI()` app mounting only
+Mirrors `tests/test_content_blog_posts.py`'s harness pattern exactly (same
+reasons documented there: `app.main` isn't importable in this checkout, so
+this file builds its own tiny `FastAPI()` app mounting only
 `content.public_router`/`content.router`, replicates `app/main.py`'s
 `protected_dependency = [Depends(verify_api_key), Depends(get_rate_limit)]`
-locally - even though the pages routes carry no per-route
-`@limiter.limit(...)` of their own (see `content.py`'s module docstring for
-why: small, bounded payloads unlike blog's paginated list), the router-level
-`protected_dependency` from `app/main.py` still applies to every route on
-`router`, so this harness keeps it identical to its siblings rather than
-inventing a leaner variant - and mints a valid admin session directly via
-`create_admin_access_token` rather than a real HTTP login round trip).
+locally, and mints a valid admin session directly via
+`create_admin_access_token` rather than a real HTTP login round trip). Also
+registers `app.state.limiter`/the `RateLimitExceeded` exception handler
+(mirroring `tests/test_auth.py::_build_test_app`) because the public page
+route now carries its own `@limiter.limit("60/minute")` (security-reviewer
+finding, Dynamic Pages builder review - see `content.py`'s module docstring
+for the "why" update).
 
 Real local Mongo (`mongodb://localhost:27017`, db `pdfconverterai`), same as
 every other test file in this suite. `content_pages` has a unique index on
@@ -50,6 +50,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.database import db, ensure_indexes
@@ -105,6 +107,8 @@ _protected_dependency = [Depends(verify_api_key), Depends(_get_rate_limit)]
 
 def _build_test_app() -> FastAPI:
     app = FastAPI()
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.include_router(content_router.public_router, prefix="/v1")
     app.include_router(content_router.router, prefix="/v1", dependencies=_protected_dependency)
 
@@ -305,6 +309,43 @@ def test_cta_banner_block_valid_content_accepted():
     assert model.blocks[0].content["message"] == "Sign up now"
 
 
+# --- cta_banner block's link.href scheme validation (BannerLink, shared
+# with homepage_section.py - security-reviewer finding, Dynamic Pages
+# builder review) -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "good_href",
+    ["/signup", "/tools/pdf/merge-pdf", "https://example.com/promo", "http://example.com"],
+)
+def test_cta_banner_link_href_site_relative_or_http_accepted(good_href):
+    block = {
+        "type": "cta_banner",
+        "content": {"message": "Sign up now", "link": {"label": "Go", "href": good_href}},
+    }
+    model = _create_model("cta-banner-good-href-test-1", blocks=[block])
+    assert model.blocks[0].content["link"]["href"] == good_href
+
+
+@pytest.mark.parametrize(
+    "bad_href",
+    [
+        "javascript:alert(document.cookie)",
+        "data:text/html,<script>alert(1)</script>",
+        "//evil.example.com",
+        "about",
+        "ftp://example.com/a",
+    ],
+)
+def test_cta_banner_link_href_bad_scheme_rejected(bad_href):
+    block = {
+        "type": "cta_banner",
+        "content": {"message": "Sign up now", "link": {"label": "Go", "href": bad_href}},
+    }
+    with pytest.raises(ValidationError):
+        _create_model("cta-banner-bad-href-test-1", blocks=[block])
+
+
 def test_ad_slot_block_valid_content_accepted():
     model = _create_model("ad-slot-block-test-1", blocks=[_AD_SLOT_BLOCK])
     assert model.blocks[0].type.value == "ad_slot"
@@ -323,6 +364,21 @@ def test_malformed_block_content_rejected():
 def test_blocks_requires_at_least_one_entry():
     with pytest.raises(ValidationError):
         _create_model("empty-blocks-test-1", blocks=[])
+
+
+def test_blocks_over_max_length_rejected():
+    """`ContentPageBase.blocks` is capped at 50 entries - security-reviewer
+    finding, Dynamic Pages builder review (unbounded blocks list + no rate
+    limit on the public route = uncapped response size)."""
+    too_many_blocks = [_HERO_BLOCK] * 51
+    with pytest.raises(ValidationError):
+        _create_model("too-many-blocks-test-1", blocks=too_many_blocks)
+
+
+def test_blocks_at_max_length_accepted():
+    exactly_max_blocks = [_HERO_BLOCK] * 50
+    model = _create_model("max-blocks-test-1", blocks=exactly_max_blocks)
+    assert len(model.blocks) == 50
 
 
 # --- extra="forbid" rejects published_at/slug on Update ---------------------
@@ -579,6 +635,23 @@ async def test_public_get_page_missing_slug_returns_404(client):
     resp = await client.get("/v1/content/pages/does-not-exist-public-page-test-1")
     assert resp.status_code == 404, resp.text
     assert resp.json()["error"]["code"] == "PAGE_NOT_FOUND"
+
+
+async def test_public_page_rate_limit_returns_429_after_threshold(client):
+    """Exercises `get_public_page`'s `@limiter.limit("60/minute")` end to
+    end (security-reviewer finding, Dynamic Pages builder review). The
+    literal `60` below must stay in sync with that decorator's value. Uses
+    a guaranteed-missing slug (404s are still counted against the rate
+    limit budget, same as a real hit) to avoid any DB setup cost across 61
+    requests - same technique as
+    `test_content_blog_posts.py::test_public_blog_single_rate_limit_returns_429_after_threshold`."""
+    _RATE_LIMIT = 60
+    for _ in range(_RATE_LIMIT):
+        resp = await client.get("/v1/content/pages/rate-limit-probe-page-slug-1")
+        assert resp.status_code == 404, resp.text
+
+    limited_resp = await client.get("/v1/content/pages/rate-limit-probe-page-slug-1")
+    assert limited_resp.status_code == 429, limited_resp.text
 
 
 async def test_page_public_route_is_registered_on_public_router_only():
