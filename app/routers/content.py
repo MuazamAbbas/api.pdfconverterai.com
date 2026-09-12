@@ -93,6 +93,39 @@ materially larger new attack surface than those siblings: `page_size` up to
 can pull several MB, versus the siblings' small, bounded payloads. `30/minute`
 on the list route, `60/minute` on the single-post route (smaller payload,
 matches typical read patterns like a page linking to several posts).
+
+Also carries the Dynamic Pages builder routes (ADR-022: Dynamic CMS Pages -
+content-block model and route-collision handling,
+`docs/architecture/adr/ADR-022-dynamic-pages-content-model-and-routing.md` -
+feature spec approved per `docs/roadmap/SPRINT_STATUS.md`'s 2026-09-12
+entry): public `GET /v1/content/pages/{slug}` (published only; a missing or
+draft slug both 404 identically), and admin
+`POST/GET/PUT/DELETE /v1/content/admin/pages[/{slug}]`, backed by
+`app/services/content/content_pages_service.py`. Same `content` module, same
+`/content` prefix, same two-router split - no new router registration.
+
+**Route shape deliberately does NOT mirror the Blog/News CMS's asymmetric
+split.** Blog's admin POST/PUT/DELETE stayed at the bare `/blog-posts` path
+and only its two admin GETs moved under `/admin/blog-posts` (a fix applied
+after the fact, once the bare-path admin GETs turned out to be permanently
+dead code - shadowed by the public router's identical (path, method) pair
+registered first, see the paragraph above). ADR-022's "Concretely" section
+groups ALL admin CRUD for pages under `/v1/content/admin/pages/**` from day
+one instead, "applying the lesson the Blog/News CMS learned the hard way ...
+done correctly the first time here costs nothing" (ADR-022's own wording).
+Do NOT "fix" this back to match blog's bare-path-for-writes pattern - there
+is no collision to work around here since every admin page route already
+lives under the `/admin/pages` prefix, and matching blog's asymmetry would
+only reintroduce inconsistency for no benefit.
+
+No new `@limiter.limit(...)` on the public pages route, unlike the two
+public blog-post routes - this collection's payloads are small and bounded
+(a page's `blocks` list is capped by each block's own field limits, e.g.
+`RichTextContent.body`'s `max_length=50000` per block, not an unbounded
+`page_size x body` product the way blog's paginated list is), so it doesn't
+carry the same "materially larger new attack surface" justification the
+blog-post rate limits document above. Noted here so `security-reviewer`
+doesn't have to re-derive why pages didn't get the same treatment blog did.
 """
 import logging
 from typing import Optional
@@ -112,6 +145,7 @@ from app.schemas.content_category import (
     ContentCategoryUpdate,
     ContentType,
 )
+from app.schemas.content_page import ContentPageCreate, ContentPageUpdate
 from app.schemas.content_tool_metadata import (
     ContentToolMetadataCreate,
     ContentToolMetadataUpdate,
@@ -138,6 +172,16 @@ from app.services.content.categories_service import (
     reorder_categories,
     update_category,
 )
+from app.services.content.content_pages_service import (
+    PageNotFound,
+    PageSlugConflict,
+    SlugReserved,
+    create_page,
+    delete_page,
+    list_all_pages,
+    update_page,
+)
+from app.services.content.content_pages_service import get_by_slug as get_page_by_slug
 from app.services.content.tags_service import list_tags
 from app.services.content.tool_metadata_service import (
     InvalidCategory,
@@ -214,6 +258,20 @@ def _blog_post_out(post) -> dict:
         "published_at": post.published_at.isoformat() if post.published_at is not None else None,
         "created_at": post.created_at.isoformat(),
         "updated_at": post.updated_at.isoformat(),
+    }
+
+
+def _page_out(page) -> dict:
+    return {
+        "id": str(page.id),
+        "slug": page.slug,
+        "title": page.title,
+        "meta_description": page.meta_description,
+        "blocks": [{"type": b.type.value, "content": b.content} for b in page.blocks],
+        "status": page.status.value,
+        "published_at": page.published_at.isoformat() if page.published_at is not None else None,
+        "created_at": page.created_at.isoformat(),
+        "updated_at": page.updated_at.isoformat(),
     }
 
 
@@ -294,6 +352,25 @@ async def get_public_blog_post(request: Request, slug: str):
         raise api_error(404, "Blog post not found", "BLOG_POST_NOT_FOUND") from exc
     logger.debug("Retrieved content_blog_posts for slug=%s", slug)
     return envelope(True, "Blog post retrieved", data=_blog_post_out(post))
+
+
+@public_router.get(
+    "/pages/{slug}",
+    summary="Public: fetch one published dynamic page by slug",
+)
+async def get_public_page(slug: str):
+    try:
+        page = await get_page_by_slug(slug, include_drafts=False)
+    except PageNotFound as exc:
+        # Expected/normal: a missing slug or an existing-but-draft slug must
+        # look identical from the public route's perspective (see
+        # content_pages_service.py's module docstring) - debug only, never
+        # warning/error, same convention get_public_blog_post uses for its
+        # own expected-miss case.
+        logger.debug("No published content_pages row for slug=%s: %s", slug, exc)
+        raise api_error(404, "Page not found", "PAGE_NOT_FOUND") from exc
+    logger.debug("Retrieved content_pages for slug=%s", slug)
+    return envelope(True, "Page retrieved", data=_page_out(page))
 
 
 @router.post(
@@ -523,3 +600,72 @@ async def delete_admin_blog_post(slug: str, admin: dict = Depends(require_admin)
         raise api_error(404, "Blog post not found", "BLOG_POST_NOT_FOUND") from exc
     logger.info("Admin %s deleted content_blog_posts slug=%s", admin.get("email"), slug)
     return envelope(True, "Blog post deleted", data=None)
+
+
+@router.post(
+    "/admin/pages",
+    summary="Admin: create a dynamic page (draft by default; born-published if status='published')",
+)
+async def create_admin_page(body: ContentPageCreate, admin: dict = Depends(require_admin)):
+    try:
+        page = await create_page(body)
+    except SlugReserved as exc:
+        logger.warning("Create rejected, reserved slug for admin %s: %s", admin.get("email"), exc)
+        raise api_error(400, "slug is reserved and cannot be used for a page", "SLUG_RESERVED") from exc
+    except PageSlugConflict as exc:
+        logger.warning("Create rejected, duplicate slug for admin %s: %s", admin.get("email"), exc)
+        raise api_error(409, "A page with this slug already exists", "PAGE_SLUG_CONFLICT") from exc
+    logger.info("Admin %s created content_pages %s (slug=%s)", admin.get("email"), page.id, page.slug)
+    return envelope(True, "Page created", data=_page_out(page))
+
+
+@router.get(
+    "/admin/pages",
+    summary="Admin: list every dynamic page, all statuses, unpaginated",
+)
+async def list_admin_pages(admin: dict = Depends(require_admin)):
+    pages = await list_all_pages()
+    logger.info("Admin %s listed %d content_pages rows", admin.get("email"), len(pages))
+    return envelope(True, "Pages retrieved", data=[_page_out(p) for p in pages])
+
+
+@router.get(
+    "/admin/pages/{slug}",
+    summary="Admin: fetch one dynamic page by slug, including drafts (for populating an edit form)",
+)
+async def get_admin_page(slug: str, admin: dict = Depends(require_admin)):
+    try:
+        page = await get_page_by_slug(slug, include_drafts=True)
+    except PageNotFound as exc:
+        logger.warning("Fetch failed, page not found: %s", slug)
+        raise api_error(404, "Page not found", "PAGE_NOT_FOUND") from exc
+    logger.info("Admin %s retrieved content_pages slug=%s", admin.get("email"), slug)
+    return envelope(True, "Page retrieved", data=_page_out(page))
+
+
+@router.put(
+    "/admin/pages/{slug}",
+    summary="Admin: edit a dynamic page (slug is immutable; published_at is stamped server-side)",
+)
+async def update_admin_page(slug: str, body: ContentPageUpdate, admin: dict = Depends(require_admin)):
+    try:
+        page = await update_page(slug, body)
+    except PageNotFound as exc:
+        logger.warning("Update failed, page not found: %s", slug)
+        raise api_error(404, "Page not found", "PAGE_NOT_FOUND") from exc
+    logger.info("Admin %s updated content_pages slug=%s", admin.get("email"), slug)
+    return envelope(True, "Page updated", data=_page_out(page))
+
+
+@router.delete(
+    "/admin/pages/{slug}",
+    summary="Admin: delete a dynamic page",
+)
+async def delete_admin_page(slug: str, admin: dict = Depends(require_admin)):
+    try:
+        await delete_page(slug)
+    except PageNotFound as exc:
+        logger.warning("Delete failed, page not found: %s", slug)
+        raise api_error(404, "Page not found", "PAGE_NOT_FOUND") from exc
+    logger.info("Admin %s deleted content_pages slug=%s", admin.get("email"), slug)
+    return envelope(True, "Page deleted", data=None)
