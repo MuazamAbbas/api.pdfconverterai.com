@@ -160,13 +160,15 @@ siblings, not nested under some shared prefix either) - do NOT "simplify"
 this into a nested `/pages/...` path, that reintroduces the exact collision
 this design avoids.
 
-No `@limiter.limit(...)` on this route (deliberate, not an oversight - see
-the route's own inline comment): unlike the public blog-post/page routes
-above, this response's size is bounded by the `content_pages` collection's
-size and contains only short slug strings (`slug` itself is capped at
-`max_length=100` in `content_page.py`), not an unbounded/attacker-influenced
-payload - the concern that motivated rate-limiting those two routes doesn't
-apply here.
+Carries `@limiter.limit("60/minute")`, same as every other public route in
+this router (`get_public_blog_post`, `get_public_blog_posts`,
+`get_public_page`). This route's *response size* is bounded regardless
+(collection size x a `max_length=100`-capped `slug` string per entry), which
+is why it was initially shipped without one - but that only argues against a
+size-based limit, not a frequency-based one, and every sibling public route
+here already carries a rate limit for defense-in-depth independent of
+payload size (security-reviewer finding, page-route-collision-check review).
+Kept consistent with that policy rather than left as the one exception.
 """
 import logging
 from typing import Optional
@@ -420,11 +422,16 @@ async def get_public_page(request: Request, slug: str):
     "/page-slugs",
     summary="Public: list every published page's slug (deploy-tooling use only)",
 )
-# Deliberately no @limiter.limit(...) here - see module docstring's
-# "GET /v1/content/page-slugs" section: unlike the blog-post/page routes
-# above, this response is bounded by collection size and contains only short
-# slug strings, not an unbounded/attacker-influenced payload.
-async def get_public_page_slugs():
+# security-reviewer finding (page-route-collision-check review): the
+# response-size argument in this route's original comment ("bounded by
+# collection size, short capped strings") is true but only justifies
+# skipping a *size*-based limit - it says nothing about call *frequency*,
+# and every sibling public route in this file (get_public_blog_post,
+# get_public_blog_posts, get_public_page) already carries a rate limit for
+# defense-in-depth regardless of payload size. Matching that policy here too
+# rather than leaving this one route as the sole unbounded exception.
+@limiter.limit("60/minute")
+async def get_public_page_slugs(request: Request):
     slugs = await list_published_slugs()
     logger.debug("Listed %d published content_pages slugs", len(slugs))
     return envelope(True, "Published page slugs retrieved", data=slugs)

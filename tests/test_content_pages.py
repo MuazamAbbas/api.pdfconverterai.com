@@ -661,6 +661,24 @@ async def test_public_page_rate_limit_returns_429_after_threshold(client):
     assert limited_resp.status_code == 429, limited_resp.text
 
 
+async def test_public_page_slugs_rate_limit_returns_429_after_threshold(client):
+    """Exercises `get_public_page_slugs`'s `@limiter.limit("60/minute")` end
+    to end (security-reviewer finding, page-route-collision-check review:
+    this route initially shipped without a rate limit since its response
+    size is bounded regardless of call frequency, but every sibling public
+    route in this file has one for defense-in-depth independent of payload
+    size - added to stay consistent with that policy). Same technique as
+    `test_public_page_rate_limit_returns_429_after_threshold` above - the
+    literal `60` must stay in sync with the decorator's value."""
+    _RATE_LIMIT = 60
+    for _ in range(_RATE_LIMIT):
+        resp = await client.get("/v1/content/page-slugs")
+        assert resp.status_code == 200, resp.text
+
+    limited_resp = await client.get("/v1/content/page-slugs")
+    assert limited_resp.status_code == 429, limited_resp.text
+
+
 async def test_page_public_route_is_registered_on_public_router_only():
     """Confirms the public route is actually declared on `public_router`
     (never gated by `protected_dependency`/`require_admin`) with only the

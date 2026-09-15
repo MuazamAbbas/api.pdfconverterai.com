@@ -127,7 +127,12 @@ async def list_published_slugs() -> list[str]:
 
     No particular ordering is guaranteed or needed.
     """
-    cursor = db.content_pages.find({"status": PageStatus.PUBLISHED.value}, {"slug": 1})
+    # {"slug": 1, "_id": 0}: an inclusion projection implicitly still
+    # includes _id unless explicitly excluded (code-reviewer nit,
+    # page-route-collision-check review) - excluded here so the query
+    # itself, not just this function's return statement, is genuinely
+    # slug-only, matching this docstring's own claim.
+    cursor = db.content_pages.find({"status": PageStatus.PUBLISHED.value}, {"slug": 1, "_id": 0})
     return [doc["slug"] async for doc in cursor]
 
 
