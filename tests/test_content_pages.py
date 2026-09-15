@@ -31,13 +31,19 @@ Covers, roughly in this order:
      `published_at`/`slug` on Update, `status` defaulting to draft on Create.
   2. `app/services/content/content_pages_service.py` - every `published_at`
      stamping branch, `SLUG_RESERVED` rejection, slug-conflict, draft
-     invisibility, unpaginated `list_all_pages`.
+     invisibility, unpaginated `list_all_pages`, and `list_published_slugs`
+     (published-only, slug-only).
   3. `app/routers/content.py`'s pages routes - public route never leaks
      drafts, all 5 admin routes require `require_admin` (parametrized,
      mirrors `test_content_blog_posts.py`'s
      `test_admin_blog_route_requires_api_key_layer_wrong_category_403`-style
      tests), and the admin list route is confirmed unpaginated (a bare
      list, not a `{items, total, ...}` envelope).
+  4. `GET /v1/content/page-slugs` (deploy-tooling route) - unauthenticated
+     200 with only published slugs, and a route-collision regression test
+     confirming it and `GET /v1/content/pages/{slug}` are genuinely distinct
+     routes that don't shadow each other, using a page literally slugged
+     `"page-slugs"`.
 """
 import logging
 from datetime import datetime, timedelta
@@ -72,6 +78,7 @@ from app.services.content.content_pages_service import (
     delete_page,
     get_by_slug,
     list_all_pages,
+    list_published_slugs,
     update_page,
 )
 
@@ -824,3 +831,111 @@ async def test_admin_page_route_valid_api_key_but_invalid_cookie_401(client, api
         json=json_body,
     )
     assert resp.status_code == 401, resp.text
+
+
+# ===========================================================================
+# 4. list_published_slugs() service function + GET /v1/content/page-slugs
+#    (deploy-tooling route, ADR-022's "Round 2" follow-up)
+# ===========================================================================
+
+
+async def test_list_published_slugs_empty_collection_returns_empty_list():
+    """No published_page_slugs-prefixed pages exist yet - confirms the
+    function doesn't error on a query that simply matches nothing (this
+    test doesn't literally empty the whole collection, it just scopes its
+    assertion to a slug prefix no other test in this file uses)."""
+    slugs = await list_published_slugs()
+    assert isinstance(slugs, list)
+    assert "list-published-slugs-nonexistent-probe-1" not in slugs
+
+
+async def test_list_published_slugs_only_returns_published_not_draft(created_page_slugs):
+    published_slug = "list-published-slugs-published-test-1"
+    draft_slug = "list-published-slugs-draft-test-1"
+    await create_page(_create_model(published_slug, status="published"))
+    await create_page(_create_model(draft_slug))  # draft by default
+    created_page_slugs.extend([published_slug, draft_slug])
+
+    slugs = await list_published_slugs()
+    assert published_slug in slugs
+    assert draft_slug not in slugs
+
+
+async def test_list_published_slugs_returns_plain_strings(created_page_slugs):
+    slug = "list-published-slugs-shape-test-1"
+    await create_page(_create_model(slug, status="published"))
+    created_page_slugs.append(slug)
+
+    slugs = await list_published_slugs()
+    assert slug in slugs
+    assert all(isinstance(s, str) for s in slugs)
+
+
+async def test_public_get_page_slugs_route_returns_200_unauthenticated(client, created_page_slugs):
+    slug = "public-page-slugs-route-test-1"
+    await create_page(_create_model(slug, status="published"))
+    created_page_slugs.append(slug)
+
+    # No headers/cookies at all - this route needs no auth.
+    resp = await client.get("/v1/content/page-slugs")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert isinstance(data, list)
+    assert slug in data
+
+
+async def test_public_get_page_slugs_route_excludes_draft(client, created_page_slugs):
+    draft_slug = "public-page-slugs-route-draft-test-1"
+    await create_page(_create_model(draft_slug))  # draft by default
+    created_page_slugs.append(draft_slug)
+
+    resp = await client.get("/v1/content/page-slugs")
+    assert resp.status_code == 200, resp.text
+    assert draft_slug not in resp.json()["data"]
+
+
+async def test_page_slugs_route_registered_on_public_router_only():
+    """Confirms `/page-slugs` is actually declared on `public_router` (never
+    gated by `protected_dependency`/`require_admin`), mirroring
+    `test_page_public_route_is_registered_on_public_router_only` above."""
+    public_paths = {route.path for route in content_router.public_router.routes}
+    assert "/content/page-slugs" in public_paths
+
+    route = next(r for r in content_router.public_router.routes if r.path == "/content/page-slugs")
+    assert route.methods == {"GET"}
+
+
+async def test_page_slugs_and_wildcard_page_route_do_not_collide(client, api_key, admin_cookie, created_page_slugs):
+    """Route-collision regression test (this task's whole reason for
+    existing - see `content.py`'s module docstring's "GET
+    /v1/content/page-slugs" section). Creates a real page literally slugged
+    "page-slugs" (valid per `_SLUG_RE` - lowercase, hyphen-separated) and
+    confirms:
+      - `GET /v1/content/pages/page-slugs` still resolves it as a single
+        page lookup by slug (the wildcard route), and
+      - `GET /v1/content/page-slugs` still returns the flat list route,
+        including that same slug as one list entry.
+    Proves the two routes don't shadow each other in practice, not just by
+    inspecting registration order.
+    """
+    slug = "page-slugs"
+    create_resp = await client.post(
+        "/v1/content/admin/pages",
+        headers=_auth_headers(api_key),
+        cookies=admin_cookie,
+        json=_page_payload(slug, status="published", title="A page literally slugged page-slugs"),
+    )
+    assert create_resp.status_code == 200, create_resp.text
+    created_page_slugs.append(slug)
+
+    single_page_resp = await client.get(f"/v1/content/pages/{slug}")
+    assert single_page_resp.status_code == 200, single_page_resp.text
+    single_page_data = single_page_resp.json()["data"]
+    assert single_page_data["slug"] == slug
+    assert single_page_data["title"] == "A page literally slugged page-slugs"
+
+    list_resp = await client.get("/v1/content/page-slugs")
+    assert list_resp.status_code == 200, list_resp.text
+    list_data = list_resp.json()["data"]
+    assert isinstance(list_data, list)
+    assert slug in list_data
