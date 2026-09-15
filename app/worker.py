@@ -81,11 +81,12 @@ async def _run_job(ctx, job_id: str, make_processor, build_result, on_completed=
     unconditionally here for every job type, so adding this one call site
     doesn't silently retrofit analytics onto all Tier 2 tools that share
     this function - see SPRINT_STATUS.md's 2026-09-15 analytics module
-    entry ("do NOT retrofit all 44 tools in this task"). Not awaited inside
-    the `try` above `mark_completed` - a failure in `on_completed` itself
-    must never turn an otherwise-successful job into a Failed one, so any
-    such call must have its own internal never-raises contract
-    (`record_tool_usage` does - see app/analytics/service.py).
+    entry ("do NOT retrofit all 44 tools in this task"). The call is wrapped
+    in its own try/except (logged via `logger.exception`, never re-raised) -
+    a failure in `on_completed` must never turn an otherwise-successful job
+    into a Failed one, and that's now enforced structurally by `_run_job`
+    itself rather than relying solely on `on_completed` callbacks (e.g.
+    `record_tool_usage` - see app/analytics/service.py) never raising.
     """
     job = await get_job(job_id)
     if job is None:
@@ -106,7 +107,12 @@ async def _run_job(ctx, job_id: str, make_processor, build_result, on_completed=
         await mark_completed(job_id, result)
         logger.info("Job %s (%s) completed", job_id, job.type)
         if on_completed is not None:
-            await on_completed(job)
+            try:
+                await on_completed(job)
+            except Exception:
+                logger.exception(
+                    "on_completed callback failed for job %s (%s)", job_id, job.type
+                )
     except PermanentProcessingError as e:
         # `logger.exception` (not `.warning`) so the real underlying error -
         # e.g. the raw `yt_dlp` exception chained via `raise ... from e` in

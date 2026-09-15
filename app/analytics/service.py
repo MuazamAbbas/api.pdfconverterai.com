@@ -69,7 +69,10 @@ async def _increment_counter(metric_type: MetricType, target: str) -> None:
         # network blip, an unexpected type on `target`, etc.) must be
         # swallowed - this function is never allowed to raise into a
         # tool-serving/job-completion critical path (ADR-023).
-        logger.error(
+        # `logger.exception` (not `.error`) so the stack trace actually
+        # lands in the logs - matches `app/worker.py`'s own
+        # unexpected-error branch.
+        logger.exception(
             "Failed to record analytics counter (metric_type=%s, target=%s): %s",
             metric_type.value, target, exc,
         )
