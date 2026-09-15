@@ -129,6 +129,46 @@ explicit `max_length=50` (see `content_page.py`), but the rate limit was
 added anyway, belt-and-suspenders, since an unauthenticated route serving a
 single-document response with no request cost is still worth bounding
 regardless of how tightly the response size itself is capped.
+
+**`GET /v1/content/page-slugs`** (ADR-022's own documented "Round 2"
+follow-up - see `content_page.py`'s module docstring's
+`RESERVED_TOP_LEVEL_SLUGS` section for the gap this closes): public,
+unauthenticated, backed by
+`app/services/content/content_pages_service.py::list_published_slugs`.
+Returns a flat JSON array of every currently-*published* page's slug - the
+sole consumer is the frontend repo's deploy-time route-collision-check
+script (a separate session's work, not built here), which diffs this list
+against `frontend/app/`'s real top-level route folder names and fails the
+frontend deploy loudly on any collision, closing the gap where
+`RESERVED_TOP_LEVEL_SLUGS` is a point-in-time snapshot that could silently
+drift out of sync with new routes.
+
+**Deliberately registered as a flat sibling under `/content` - `/page-slugs`
+- never nested under `/pages`.** `GET /v1/content/pages/{slug}` is a
+wildcard route (`{slug}` matches any string in that path position), and
+Starlette/FastAPI matches routes in registration order - a literal path
+segment nested under `/pages/` (e.g. `/pages/slugs`, `/pages/list`) would
+either collide with `{slug}` (if registered after it, look like a page-slug
+lookup that 404s) or silently reserve that literal word as an unusable page
+slug forever (if registered before it, order-dependent and fragile). This
+codebase has already shipped exactly this class of bug once (the Blog/News
+CMS's admin-GET/public-GET path collision, see the earlier paragraph above).
+`/page-slugs` structurally cannot collide with `/pages/{slug}` regardless of
+registration order, and matches this router's existing flat-namespace style
+(`/categories`, `/tags`, `/tool-metadata`, `/blog-posts` are all flat
+siblings, not nested under some shared prefix either) - do NOT "simplify"
+this into a nested `/pages/...` path, that reintroduces the exact collision
+this design avoids.
+
+Carries `@limiter.limit("60/minute")`, same as every other public route in
+this router (`get_public_blog_post`, `get_public_blog_posts`,
+`get_public_page`). This route's *response size* is bounded regardless
+(collection size x a `max_length=100`-capped `slug` string per entry), which
+is why it was initially shipped without one - but that only argues against a
+size-based limit, not a frequency-based one, and every sibling public route
+here already carries a rate limit for defense-in-depth independent of
+payload size (security-reviewer finding, page-route-collision-check review).
+Kept consistent with that policy rather than left as the one exception.
 """
 import logging
 from typing import Optional
@@ -182,6 +222,7 @@ from app.services.content.content_pages_service import (
     create_page,
     delete_page,
     list_all_pages,
+    list_published_slugs,
     update_page,
 )
 from app.services.content.content_pages_service import get_by_slug as get_page_by_slug
@@ -375,6 +416,25 @@ async def get_public_page(request: Request, slug: str):
         raise api_error(404, "Page not found", "PAGE_NOT_FOUND") from exc
     logger.debug("Retrieved content_pages for slug=%s", slug)
     return envelope(True, "Page retrieved", data=_page_out(page))
+
+
+@public_router.get(
+    "/page-slugs",
+    summary="Public: list every published page's slug (deploy-tooling use only)",
+)
+# security-reviewer finding (page-route-collision-check review): the
+# response-size argument in this route's original comment ("bounded by
+# collection size, short capped strings") is true but only justifies
+# skipping a *size*-based limit - it says nothing about call *frequency*,
+# and every sibling public route in this file (get_public_blog_post,
+# get_public_blog_posts, get_public_page) already carries a rate limit for
+# defense-in-depth regardless of payload size. Matching that policy here too
+# rather than leaving this one route as the sole unbounded exception.
+@limiter.limit("60/minute")
+async def get_public_page_slugs(request: Request):
+    slugs = await list_published_slugs()
+    logger.debug("Listed %d published content_pages slugs", len(slugs))
+    return envelope(True, "Published page slugs retrieved", data=slugs)
 
 
 @router.post(

@@ -106,6 +106,36 @@ async def get_by_slug(slug: str, *, include_drafts: bool = False) -> ContentPage
     return page
 
 
+async def list_published_slugs() -> list[str]:
+    """Every currently-*published* `content_pages` slug, and nothing else -
+    a deliberately minimal, slug-only projection (`{"slug": 1}`, no other
+    fields fetched), unlike `list_all_pages`'s full `ContentPageDocument`
+    shape.
+
+    The sole caller is the frontend repo's deploy-time route-collision-check
+    script (ADR-022's own documented "Round 2" follow-up - see
+    `content_page.py`'s module docstring's `RESERVED_TOP_LEVEL_SLUGS`
+    section for the gap this closes): it diffs this list against
+    `frontend/app/`'s real top-level route folder names and fails the
+    frontend deploy loudly on any collision, so the reserved-slug blocklist
+    (a point-in-time snapshot) can't silently drift out of sync with new
+    routes without being caught. That consumer is an unattended CI step, not
+    a logged-in admin, and only ever needs slug *membership* - not display
+    order, not the rest of each page's content - so this is a
+    purpose-built, narrow function rather than a filtered variant bolted
+    onto `list_all_pages`.
+
+    No particular ordering is guaranteed or needed.
+    """
+    # {"slug": 1, "_id": 0}: an inclusion projection implicitly still
+    # includes _id unless explicitly excluded (code-reviewer nit,
+    # page-route-collision-check review) - excluded here so the query
+    # itself, not just this function's return statement, is genuinely
+    # slug-only, matching this docstring's own claim.
+    cursor = db.content_pages.find({"status": PageStatus.PUBLISHED.value}, {"slug": 1, "_id": 0})
+    return [doc["slug"] async for doc in cursor]
+
+
 async def list_all_pages() -> list[ContentPageDocument]:
     """Every `content_pages` document, regardless of status, sorted by
     `created_at` descending - backs the admin `GET /v1/content/admin/pages`
