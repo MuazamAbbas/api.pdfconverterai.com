@@ -15,13 +15,14 @@ import dns.resolver
 import whois
 from bson import ObjectId
 from cryptography import x509
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from ipwhois import IPWhois
 from ipwhois.exceptions import BaseIpwhoisException, IPDefinedError
 from pydantic import BaseModel
 from whois.parser import WhoisEntry
 from whois.whois import NICClient
 
+from app.analytics.service import record_tool_usage
 from app.core.security import verify_api_key
 from app.models.web_tools import (
     IPLookupRequest,
@@ -100,11 +101,23 @@ async def test_web_tools(api_key: dict = Depends(verify_api_key)):
     return {"message": "Web Tools router is working"}
 
 @router.post("/url_encode", summary="Encode a URL")
-async def url_encode(request: URLEncodeRequest, api_key: dict = Depends(verify_api_key)):
+async def url_encode(
+    request: URLEncodeRequest,
+    background_tasks: BackgroundTasks,
+    api_key: dict = Depends(verify_api_key),
+):
     logger.debug("🔧 Encoding URL: %s", request.url)
     try:
         encoded_url = urllib.parse.quote(request.url)
         logger.debug("✅ URL encoded: %s", encoded_url)
+        # ADR-023 (Analytics Module Foundation): fire-and-forget tool-usage
+        # counter increment - proof-of-pattern for wiring a Tier 1 tool,
+        # chosen as the simplest existing Tier 1 endpoint (see
+        # SPRINT_STATUS.md's 2026-09-15 analytics module entry). Runs via
+        # BackgroundTask after this response is already sent, and
+        # record_tool_usage never raises internally (app/analytics/
+        # service.py), so this adds no latency/failure risk here.
+        background_tasks.add_task(record_tool_usage, "url-encoder-decoder", "tier1")
         return {"original_url": request.url, "encoded_url": encoded_url}
     except Exception as e:
         logger.exception("💥 Error encoding URL: %s", str(e))

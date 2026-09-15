@@ -64,13 +64,28 @@ logger = logging.getLogger(__name__)
 MAX_TRIES = 3
 
 
-async def _run_job(ctx, job_id: str, make_processor, build_result) -> None:
+async def _run_job(ctx, job_id: str, make_processor, build_result, on_completed=None) -> None:
     """Shared orchestration for every PDF job type.
 
     `make_processor` builds the Processor instance (called inside here so
     each task function's heavy import stays lazy). `build_result` turns the
     Processor's raw result into what gets stored on `jobs.result` (e.g.
     registering an output file for `pdf_to_word`).
+
+    `on_completed` (optional, `async def on_completed(job) -> None`) runs
+    once, immediately after `mark_completed` succeeds, only for job types
+    that pass it - e.g. `pdf_split` passes a callback that calls
+    `app.analytics.service.record_tool_usage` (ADR-023, proof-of-pattern for
+    wiring a Tier 2 job's transition-to-Completed path; see that task
+    function below). Deliberately opt-in per job type rather than called
+    unconditionally here for every job type, so adding this one call site
+    doesn't silently retrofit analytics onto all Tier 2 tools that share
+    this function - see SPRINT_STATUS.md's 2026-09-15 analytics module
+    entry ("do NOT retrofit all 44 tools in this task"). Not awaited inside
+    the `try` above `mark_completed` - a failure in `on_completed` itself
+    must never turn an otherwise-successful job into a Failed one, so any
+    such call must have its own internal never-raises contract
+    (`record_tool_usage` does - see app/analytics/service.py).
     """
     job = await get_job(job_id)
     if job is None:
@@ -90,6 +105,8 @@ async def _run_job(ctx, job_id: str, make_processor, build_result) -> None:
         result = await build_result(job, file_doc, raw_result)
         await mark_completed(job_id, result)
         logger.info("Job %s (%s) completed", job_id, job.type)
+        if on_completed is not None:
+            await on_completed(job)
     except PermanentProcessingError as e:
         # `logger.exception` (not `.warning`) so the real underlying error -
         # e.g. the raw `yt_dlp` exception chained via `raise ... from e` in
@@ -254,7 +271,21 @@ async def pdf_split(ctx, job_id: str) -> None:
         )
         return {"outputFileId": str(output_doc.id)}
 
-    await _run_job(ctx, job_id, SplitProcessor, build_result)
+    # ADR-023 (Analytics Module Foundation): fire-and-forget tool-usage
+    # counter increment - proof-of-pattern for wiring a Tier 2 job's
+    # transition-to-Completed path, chosen as the simplest existing
+    # single-file Tier 2 job type with a live frontend slug ("pdf-splitter",
+    # frontend/lib/tools-registry.ts) - see SPRINT_STATUS.md's 2026-09-15
+    # analytics module entry. `record_tool_usage` never raises internally
+    # (app/analytics/service.py), so awaiting it here directly - no HTTP
+    # response exists in this worker process to attach a `BackgroundTask`
+    # to - adds no failure risk to this job.
+    async def on_completed(job):
+        from app.analytics.service import record_tool_usage
+
+        await record_tool_usage("pdf-splitter", "tier2")
+
+    await _run_job(ctx, job_id, SplitProcessor, build_result, on_completed=on_completed)
 
 
 async def image_ocr(ctx, job_id: str) -> None:

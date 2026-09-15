@@ -26,6 +26,7 @@ from app.core.storage import cleanup_expired_files  # noqa: E402
 from app.routers import (  # noqa: E402
     admin,
     ai_tools,
+    analytics,
     auth,
     binary_tools,
     calculators,
@@ -139,6 +140,15 @@ app.include_router(admin.router, prefix="/v1", tags=["Admin"], dependencies=prot
 # like `admin.router`, plus its own `Depends(require_admin)` per route.
 app.include_router(content.public_router, prefix="/v1", tags=["Content"])
 app.include_router(content.router, prefix="/v1", tags=["Content"], dependencies=protected_dependency)
+# `analytics` (ADR-023, Analytics Module Foundation) - new module, single
+# route (`POST /v1/analytics/pageview`), no public/unauthenticated split
+# needed (unlike `admin`/`content`) since only the frontend's own
+# server-side proxy is meant to call it. Gets `protected_dependency` here
+# exactly like every other tool router - NEW ROUTER, so the
+# `frontend-service` API key's `categories` array needs `"analytics"`
+# added via `$addToSet` before this is usable in production (see
+# app/routers/analytics.py's module docstring and this PR's description).
+app.include_router(analytics.router, prefix="/v1", tags=["Analytics"], dependencies=protected_dependency)
 app.include_router(ai_tools.router, prefix="/v1", tags=["AI Tools"], dependencies=protected_dependency)
 app.include_router(seo_tools.router, prefix="/v1", tags=["SEO Tools"], dependencies=protected_dependency)
 app.include_router(web_tools.router, prefix="/v1", tags=["Web Tools"], dependencies=protected_dependency)
