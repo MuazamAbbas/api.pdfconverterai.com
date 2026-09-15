@@ -265,6 +265,41 @@ async def ensure_indexes():
         await db.content_pages.create_index(
             "slug", unique=True, name="content_pages_slug_unique"
         )
+        # `analytics` module (ADR-023: Analytics Module Foundation - Daily
+        # Counter Aggregation, Async In-Process Writes; founder-approved
+        # spec, SPRINT_STATUS.md's 2026-09-15 "Spec approved: Analytics
+        # module (foundation)" entry) - `analytics_counters` is a new
+        # collection, flagged per CLAUDE.md's "don't invent a new collection
+        # without flagging it" rule, same convention as
+        # `admin_users`/`homepage_sections`/`content_categories` above. Full
+        # indexing/uniqueness reasoning lives in
+        # app/schemas/analytics_counter.py's module docstring; summary:
+        #   - Unique compound index on (metric_type, target, date), in that
+        #     order - both the upsert key (guarantees concurrent $inc
+        #     upserts for the same tuple can never create duplicate counter
+        #     docs, same insurance role ai_tools_usage_apiKeyId_date/
+        #     seo_tools_usage_apiKeyId_hourBucket play for their own
+        #     upserts) and the shape the future dashboard query needs:
+        #     find({"metric_type": ..., "target": ...}) filtered/sorted by
+        #     "date" for a "last N days" trend. metric_type/target lead
+        #     (always equality-matched); date is last (the range/sort
+        #     field) - the standard "equality prefix, then range/sort
+        #     field" compound-index rule this needs to actually serve that
+        #     query instead of falling back to a collection scan.
+        #   - Deliberately NO TTL index, unlike ai_tools_usage/
+        #     seo_tools_usage/files/jobs above - this is a bounded, permanent
+        #     aggregation table (capped by tools+pages x days, not by
+        #     traffic volume), and the whole point of this collection is to
+        #     let the future dashboard graph historical per-day trends
+        #     indefinitely. A TTL index here would silently delete the exact
+        #     historical data the dashboard exists to show. Confirmed
+        #     against ADR-023/the approved spec, not a default copied from
+        #     the files/jobs/*_usage precedent.
+        await db.analytics_counters.create_index(
+            [("metric_type", 1), ("target", 1), ("date", 1)],
+            unique=True,
+            name="analytics_counters_metric_type_target_date_unique",
+        )
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")
