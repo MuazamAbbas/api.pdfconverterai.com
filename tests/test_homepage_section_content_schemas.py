@@ -78,6 +78,11 @@ def test_blog_news_content_accepts_without_category():
     assert content.category is None
 
 
+def test_blog_news_content_accepts_count_boundaries():
+    assert BlogNewsContent(heading="Latest", count=1).count == 1
+    assert BlogNewsContent(heading="Latest", count=6).count == 6
+
+
 def test_blog_news_content_rejects_count_zero():
     with pytest.raises(ValidationError):
         BlogNewsContent(heading="Latest", count=0)

@@ -236,7 +236,7 @@ class BlogNewsContent(BaseModel):
     never stores post content, only what the frontend needs to fetch the
     right posts (`count`/`category`) from the existing public `content`
     module's blog-post endpoint directly. `category` stores a
-    `content_categories.slug` value and, same split
+    `content_categories.slug` value and, following the same split
     `ContentBlogPostBase.category`'s docstring documents, is deliberately
     **not** validated against the database at this schema layer - and,
     per ADR-021, this schema must never reference `content_blog_post.py`
