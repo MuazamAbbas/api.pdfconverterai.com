@@ -67,17 +67,30 @@ actual index creation):
   structural site config, not transient processing/upload metadata).
 
 **Content shape enforcement:** `content`'s shape varies by `type` (hero /
-banner / ad_slot / tool_grid). `HomepageSectionBase` validates `content`
-against a per-`type` sub-model (`HeroContent`/`BannerContent`/
-`AdSlotContent`/`ToolGridContent`) via a `model_validator`, so a
-mismatched or malformed `content` payload is rejected by Pydantic before
-it ever reaches Mongo — this is the schema-level enforcement of the
-`tool_grid` invariant called out in this feature's spec: `ToolGridContent`
-is an empty, `extra="forbid"` model, so `content` for a `type: "tool_grid"`
-document can only ever validate as `{}`. This is defense-in-depth on top
-of (not a replacement for) the application-layer rule that nothing ever
-writes to a `tool_grid` document's `content` in the first place (it's
-registry-driven from the frontend, never admin-authored).
+banner / ad_slot / tool_grid / slider / blog_news). `HomepageSectionBase`
+validates `content` against a per-`type` sub-model (`HeroContent`/
+`BannerContent`/`AdSlotContent`/`ToolGridContent`/`SliderContent`/
+`BlogNewsContent`) via a `model_validator`, so a mismatched or malformed
+`content` payload is rejected by Pydantic before it ever reaches Mongo —
+this is the schema-level enforcement of the `tool_grid` invariant called
+out in this feature's spec: `ToolGridContent` is an empty, `extra="forbid"`
+model, so `content` for a `type: "tool_grid"` document can only ever
+validate as `{}`. This is defense-in-depth on top of (not a replacement
+for) the application-layer rule that nothing ever writes to a `tool_grid`
+document's `content` in the first place (it's registry-driven from the
+frontend, never admin-authored).
+
+`SliderContent` (task #43) bounds `slides` to 1-8 items — a document
+field, not a separate collection, so it stays small and bounded rather
+than unbounded (Handbook C.9's document-field-array default); each
+`SliderSlide` reuses `BannerLink` for its optional CTA and enforces the
+same http(s)-only `image_url` scheme rule as
+`ContentBlogPostBase.cover_image_url`. `BlogNewsContent` is a
+shape-only config object (`heading`/`count`/`category`) — it deliberately
+never queries or references `content_blog_posts`/`content_blog_post.py`
+(ADR-021 forbids an `admin`<->`content` module dependency in either
+direction); the frontend resolves `category`/`count` into actual posts by
+calling the public `content` module's own blog-post endpoint directly.
 
 `type` is intentionally absent from `HomepageSectionUpdate` — a section's
 `type` is fixed at creation (by the seed script) and never changes via the
@@ -100,6 +113,8 @@ class SectionType(str, Enum):
     BANNER = "banner"
     TOOL_GRID = "tool_grid"
     AD_SLOT = "ad_slot"
+    SLIDER = "slider"
+    BLOG_NEWS = "blog_news"
 
 
 class BannerLink(BaseModel):
@@ -178,11 +193,70 @@ class ToolGridContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SliderSlide(BaseModel):
+    """One slide inside a `slider` section. `image_url` is a plain
+    admin-pasted URL (not a file upload - same convention
+    `ContentBlogPostBase.cover_image_url` documents) and is required, so its
+    http(s)-only scheme validator below adapts that field's (optional)
+    validator rather than being copy-pasted verbatim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image_url: str = Field(..., min_length=1, max_length=2048)
+    heading: Optional[str] = Field(default=None, max_length=200)
+    link: Optional[BannerLink] = None
+
+    @field_validator("image_url")
+    @classmethod
+    def _validate_image_url_scheme(cls, value: str) -> str:
+        # Same http(s)-only rule/reasoning as
+        # ContentBlogPostBase._validate_cover_image_scheme, adapted for a
+        # required (not Optional) field - no `None` bypass here.
+        if not (value.startswith("http://") or value.startswith("https://")):
+            raise ValueError(
+                f"image_url {value!r} must start with http:// or https:// - "
+                "no other URL scheme is accepted"
+            )
+        return value
+
+
+class SliderContent(BaseModel):
+    """Homepage image/promo carousel. `slides` is bounded 1-8 - a document
+    field, not a growing collection, so it stays small (Handbook C.9's
+    document-field-array default), and an empty slider would render
+    nothing useful on the public homepage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slides: list[SliderSlide] = Field(..., min_length=1, max_length=8)
+
+
+class BlogNewsContent(BaseModel):
+    """Config-only object for a homepage "latest posts" teaser section: it
+    never stores post content, only what the frontend needs to fetch the
+    right posts (`count`/`category`) from the existing public `content`
+    module's blog-post endpoint directly. `category` stores a
+    `content_categories.slug` value and, same split
+    `ContentBlogPostBase.category`'s docstring documents, is deliberately
+    **not** validated against the database at this schema layer - and,
+    per ADR-021, this schema must never reference `content_blog_post.py`
+    or query `content_blog_posts` (the `admin` and `content` modules never
+    depend on each other in either direction)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    heading: str = Field(..., min_length=1, max_length=200)
+    count: int = Field(..., ge=1, le=6)
+    category: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+
 _CONTENT_MODEL_BY_TYPE: dict[SectionType, type[BaseModel]] = {
     SectionType.HERO: HeroContent,
     SectionType.BANNER: BannerContent,
     SectionType.AD_SLOT: AdSlotContent,
     SectionType.TOOL_GRID: ToolGridContent,
+    SectionType.SLIDER: SliderContent,
+    SectionType.BLOG_NEWS: BlogNewsContent,
 }
 
 

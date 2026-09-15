@@ -267,10 +267,16 @@ _VALID_CONTENT_BY_TYPE = {
     "banner": {"message": "New tool launched!", "style": "announcement"},
     "ad_slot": {"placement_id": "homepage-top", "height_px": 250},
     "tool_grid": {},
+    "slider": {
+        "slides": [
+            {"image_url": "https://cdn.example.com/slide-1.jpg", "heading": "Slide One"},
+        ]
+    },
+    "blog_news": {"heading": "Latest from the blog", "count": 3},
 }
 
 
-@pytest.mark.parametrize("section_type", ["hero", "banner", "ad_slot", "tool_grid"])
+@pytest.mark.parametrize("section_type", ["hero", "banner", "ad_slot", "tool_grid", "slider", "blog_news"])
 async def test_create_each_type_with_valid_content_succeeds(
     client, api_key, admin_cookie, created_section_ids, section_type
 ):
@@ -295,6 +301,10 @@ async def test_create_each_type_with_valid_content_succeeds(
         ("ad_slot", {"placement_id": "x", "height_px": -5}),
         ("ad_slot", {"placement_id": "x"}),  # missing required height_px
         ("tool_grid", {"unexpected": "content is forbidden for tool_grid"}),
+        ("slider", {"slides": []}),  # below min_length=1
+        ("slider", {"slides": [{"image_url": "javascript:alert(1)"}]}),  # non-http(s) scheme
+        ("blog_news", {"heading": "Latest", "count": 0}),  # below ge=1
+        ("blog_news", {"heading": "Latest", "count": 3, "unexpected": "forbidden"}),
     ],
 )
 async def test_create_rejects_invalid_content_for_type_422(
