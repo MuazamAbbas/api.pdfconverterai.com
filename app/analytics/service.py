@@ -22,12 +22,21 @@ routes - see `app/routers/analytics.py` and `app/routers/web_tools.py`'s
 completion - see `app/worker.py`'s `pdf_split`), which has no HTTP response
 to attach a `BackgroundTask` to in the first place.
 
-Both functions are intentionally the *only* two public entry points here -
-no direct `db.analytics_counters` access from any router/worker/processor,
-same discipline `app/services/jobs/service.py` documents for `db.jobs`.
+`record_tool_usage`/`record_page_view` were intentionally the *only* two
+public entry points here for Round 1 (write-only) - `get_summary` is the
+Round 2 read-side addition (2026-09-16 "Spec approved: Admin Dashboard
+analytics visualization (graphs)"), the dashboard consumption that Round 1
+explicitly deferred. It's a plain query (no upsert, no "never raises"
+contract - a read failure should surface as a real error to its admin-only
+caller, not be swallowed), but it keeps the same discipline these two
+functions already established: no direct `db.analytics_counters` access
+from any router/worker/processor, same discipline
+`app/services/jobs/service.py` documents for `db.jobs`. Three public entry
+points now, not two.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from app.core.database import db
 from app.schemas.analytics_counter import MetricType
@@ -120,3 +129,51 @@ async def record_page_view(path: str) -> None:
         logger.warning("record_page_view called with empty path - skipping")
         return
     await _increment_counter(MetricType.PAGE_VIEW, path)
+
+
+async def get_summary(metric_type: MetricType, days: int, target: Optional[str] = None) -> list[dict]:
+    """Read `analytics_counters` for `metric_type` over the last `days` UTC
+    days (inclusive of today), grouped by `target`, for the Admin Dashboard's
+    graphs (`GET /v1/analytics/summary`, `app/routers/analytics.py`).
+
+    Returns a list of `{"target": str, "data": [{"date": "YYYY-MM-DD",
+    "count": int}, ...]}` - one entry per distinct `target` actually found
+    in the query result, each `data` list sorted ascending by date. Returns
+    `[]` for a metric_type/target combination with zero matching documents -
+    this is the expected, normal case for most tools right now (see this
+    endpoint's approved spec's "Data-sparsity scope"), not an error.
+
+    Uses the existing `(metric_type, target, date)` compound index (see
+    `app/schemas/analytics_counter.py`) - `metric_type` (and `target`, when
+    given) are equality-matched, `date` is the `$gte`/`$lte` range field,
+    exactly the index's declared field order, so this is index-only, no new
+    index needed.
+
+    `date` range is computed as plain `YYYY-MM-DD` strings (today's UTC date
+    back `days - 1` days) and compared lexicographically against the stored
+    string field - see the schema module docstring for why that's a correct,
+    index-friendly range query with no datetime parsing needed.
+    """
+    now = datetime.now(timezone.utc)
+    end_date = now.strftime("%Y-%m-%d")
+    start_date = (now - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+    query: dict = {
+        "metric_type": metric_type.value,
+        "date": {"$gte": start_date, "$lte": end_date},
+    }
+    if target:
+        query["target"] = target
+
+    cursor = db.analytics_counters.find(
+        query, projection={"_id": 0, "target": 1, "date": 1, "count": 1}
+    ).sort([("target", 1), ("date", 1)])
+
+    # Plain dict, not defaultdict: insertion order (target-sorted, then
+    # date-sorted within each target per the query's own sort) is preserved
+    # and becomes the response's order for free.
+    grouped: dict[str, list[dict]] = {}
+    async for doc in cursor:
+        grouped.setdefault(doc["target"], []).append({"date": doc["date"], "count": doc["count"]})
+
+    return [{"target": t, "data": data} for t, data in grouped.items()]
