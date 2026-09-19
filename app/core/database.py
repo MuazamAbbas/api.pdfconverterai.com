@@ -300,6 +300,30 @@ async def ensure_indexes():
             unique=True,
             name="analytics_counters_metric_type_target_date_unique",
         )
+        # `content` module (ADR-021 foundation, Admin-managed SEO &
+        # site-verification settings, Round 1 — founder-approved spec,
+        # SPRINT_STATUS.md's 2026-09-19 "Spec approved: Admin-managed SEO &
+        # site-verification settings (Round 1: ads.txt + verification
+        # codes)" entry) - `site_settings` is a new collection, flagged per
+        # CLAUDE.md's "don't invent a new collection without flagging it"
+        # rule, same convention as `content_categories`/`tags`/
+        # `content_tool_metadata`/`content_blog_posts`/`content_pages`/
+        # `analytics_counters` above.
+        #
+        # Deliberately NO create_index() call here, unlike every sibling
+        # collection above - this is intentional, not an oversight. Full
+        # reasoning lives in app/schemas/site_settings.py's module
+        # docstring ("Indexing decision" section); summary: `site_settings`
+        # is a true singleton (exactly one document, ever, addressed only
+        # by its own hardcoded `_id` - SITE_SETTINGS_SINGLETON_ID). Every
+        # read and write always looks it up by that exact `_id`, which
+        # MongoDB already indexes automatically and unconditionally for
+        # every collection - there is no secondary field this collection is
+        # ever filtered/sorted by (no slug, no status, no order), so there
+        # is nothing left for a custom index to usefully serve. No TTL
+        # index either: structural site configuration, no natural expiry -
+        # same reasoning as content_categories/content_tool_metadata/
+        # content_blog_posts/content_pages/homepage_sections above.
         logger.info("Verified files/jobs indexes")
     except Exception as e:
         logger.error(f"Failed to create files/jobs indexes: {str(e)}")
