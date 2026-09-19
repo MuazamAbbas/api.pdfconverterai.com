@@ -178,6 +178,22 @@ size-based limit, not a frequency-based one, and every sibling public route
 here already carries a rate limit for defense-in-depth independent of
 payload size (security-reviewer finding, page-route-collision-check review).
 Kept consistent with that policy rather than left as the one exception.
+
+Also carries the Admin-managed SEO & site-verification settings routes,
+Round 1 (ads.txt + verification codes; feature spec approved per
+`docs/roadmap/SPRINT_STATUS.md`'s 2026-09-19 entry): public
+`GET /v1/content/site-settings` and admin `PUT /v1/content/site-settings`,
+backed by `app/services/content/site_settings_service.py`. Same `content`
+module, same `/content` prefix, same two-router split, no new router
+registration. `site_settings` is a true singleton collection (exactly one
+document, addressed by a fixed `_id` - see
+`app/schemas/site_settings.py`'s module docstring), so unlike every other
+resource in this router there is no id/slug path parameter on either route -
+`GET` returns sane empty defaults before any admin write ever happens
+(never a 404, never an implicit insert), and `PUT` is a full-replace upsert.
+Round 2 (`head_injection_code`/`body_injection_code`, raw HTML injection) is
+explicitly out of scope until a separate ADR is approved - do not add those
+fields/routes here without one.
 """
 import logging
 from typing import Optional
@@ -202,6 +218,7 @@ from app.schemas.content_tool_metadata import (
     ContentToolMetadataCreate,
     ContentToolMetadataUpdate,
 )
+from app.schemas.site_settings import SiteSettingsUpdate
 from app.services.content.blog_posts_service import (
     BlogPostNotFound,
     BlogPostSlugConflict,
@@ -235,6 +252,10 @@ from app.services.content.content_pages_service import (
     update_page,
 )
 from app.services.content.content_pages_service import get_by_slug as get_page_by_slug
+from app.services.content.site_settings_service import (
+    get_site_settings,
+    update_site_settings,
+)
 from app.services.content.tags_service import list_tags
 from app.services.content.tool_metadata_service import (
     InvalidCategory,
@@ -325,6 +346,13 @@ def _page_out(page) -> dict:
         "published_at": page.published_at.isoformat() if page.published_at is not None else None,
         "created_at": page.created_at.isoformat(),
         "updated_at": page.updated_at.isoformat(),
+    }
+
+
+def _site_settings_out(settings) -> dict:
+    return {
+        "ads_txt_content": settings.ads_txt_content,
+        "verification_codes": [vc.model_dump() for vc in settings.verification_codes],
     }
 
 
@@ -444,6 +472,16 @@ async def get_public_page_slugs(request: Request):
     slugs = await list_published_slugs()
     logger.debug("Listed %d published content_pages slugs", len(slugs))
     return envelope(True, "Published page slugs retrieved", data=slugs)
+
+
+@public_router.get(
+    "/site-settings",
+    summary="Public: fetch the site's ads.txt content and search-engine verification codes",
+)
+async def get_public_site_settings():
+    settings = await get_site_settings()
+    logger.debug("Retrieved site_settings (verification_codes count=%d)", len(settings.verification_codes))
+    return envelope(True, "Site settings retrieved", data=_site_settings_out(settings))
 
 
 @router.post(
@@ -742,3 +780,17 @@ async def delete_admin_page(slug: str, admin: dict = Depends(require_admin)):
         raise api_error(404, "Page not found", "PAGE_NOT_FOUND") from exc
     logger.info("Admin %s deleted content_pages slug=%s", admin.get("email"), slug)
     return envelope(True, "Page deleted", data=None)
+
+
+@router.put(
+    "/site-settings",
+    summary="Admin: replace the site's ads.txt content and search-engine verification codes",
+)
+async def update_admin_site_settings(body: SiteSettingsUpdate, admin: dict = Depends(require_admin)):
+    settings = await update_site_settings(body)
+    logger.info(
+        "Admin %s updated site settings (verification_codes count=%d)",
+        admin.get("email"),
+        len(settings.verification_codes),
+    )
+    return envelope(True, "Site settings updated", data=_site_settings_out(settings))
