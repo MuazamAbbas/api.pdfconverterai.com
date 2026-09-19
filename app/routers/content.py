@@ -478,7 +478,15 @@ async def get_public_page_slugs(request: Request):
     "/site-settings",
     summary="Public: fetch the site's ads.txt content and search-engine verification codes",
 )
-async def get_public_site_settings():
+# security-reviewer finding (this feature's own review): this route is
+# spec'd to be called on every anonymous page load (root-layout
+# generateMetadata + /ads.txt) - higher-frequency than any already-protected
+# sibling route in this file (get_public_blog_post, get_public_blog_posts,
+# get_public_page, get_public_page_slugs), yet was shipped without the same
+# @limiter.limit(...) defense-in-depth those siblings all carry. Matching
+# that policy here too rather than leaving this one route as the exception.
+@limiter.limit("60/minute")
+async def get_public_site_settings(request: Request):
     settings = await get_site_settings()
     logger.debug("Retrieved site_settings (verification_codes count=%d)", len(settings.verification_codes))
     return envelope(True, "Site settings retrieved", data=_site_settings_out(settings))

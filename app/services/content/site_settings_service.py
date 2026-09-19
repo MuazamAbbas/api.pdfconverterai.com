@@ -28,6 +28,7 @@ from datetime import datetime
 from app.core.database import db
 from app.schemas.site_settings import (
     SITE_SETTINGS_SINGLETON_ID,
+    SiteSettingsDocument,
     SiteSettingsRead,
     SiteSettingsUpdate,
     default_site_settings,
@@ -42,11 +43,17 @@ def _to_read(doc: dict) -> SiteSettingsRead:
     document always also carries `_id`/`created_at`/`updated_at` - unpacking
     the raw doc directly (`SiteSettingsRead(**doc)`) raises a validation
     error on every document that actually exists (test-runner finding: every
-    GET after any write, and the PUT's own re-read, 500'd). Pick only the
-    declared fields instead of unpacking the whole document."""
+    GET after any write, and the PUT's own re-read, 500'd). Validate through
+    `SiteSettingsDocument` first (which does declare those fields, and gives
+    this the same real-validation-of-the-persisted-shape guarantee every
+    other read path in this codebase gets, rather than trusting the raw dict
+    blindly), then narrow to just the two Round 1 fields for the response
+    shape - `code-reviewer` flagged `SiteSettingsDocument` as unused dead code
+    before this."""
+    validated = SiteSettingsDocument(**doc)
     return SiteSettingsRead(
-        ads_txt_content=doc["ads_txt_content"],
-        verification_codes=doc["verification_codes"],
+        ads_txt_content=validated.ads_txt_content,
+        verification_codes=validated.verification_codes,
     )
 
 

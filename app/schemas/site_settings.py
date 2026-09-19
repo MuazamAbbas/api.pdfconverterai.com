@@ -84,8 +84,20 @@ without it having to duplicate field defaults inline:
 
 ```python
 doc = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
-return SiteSettingsRead(**doc) if doc is not None else default_site_settings()
+if doc is None:
+    return default_site_settings()
+return SiteSettingsRead(**SiteSettingsDocument(**doc).model_dump(exclude={"id", "created_at", "updated_at"}))
 ```
+
+**Do not unpack a raw Mongo document directly into `SiteSettingsRead(**doc)`.** A real
+document always also carries `_id`/`created_at`/`updated_at`, and `SiteSettingsRead`
+inherits `extra="forbid"` from `SiteSettingsBase` — it doesn't declare those fields, so
+unpacking the raw dict raises a validation error on every document that actually exists
+(caught by `test-runner` before merge: every `GET` after any write, and the write path's
+own re-read, 500'd). Validate the raw doc through `SiteSettingsDocument` first (which does
+declare those fields), then narrow to just the two Round 1 fields for the response shape —
+see `app/services/content/site_settings_service.py`'s `_to_read()` helper, the one place
+this pattern is actually implemented.
 
 ## Round 2 extensibility (do not build now)
 
@@ -344,6 +356,27 @@ class SiteSettingsBase(BaseModel):
             "not the exact count of known providers — see module docstring."
         ),
     )
+
+    @field_validator("verification_codes")
+    @classmethod
+    def _reject_duplicate_names(
+        cls, value: list["SiteVerificationCode"]
+    ) -> list["SiteVerificationCode"]:
+        """`code-reviewer` flagged (Low, non-blocking): two entries with the
+        same `name` (e.g. an admin accidentally pasting the same provider
+        twice) both pass without this check, but `app/layout.tsx`'s
+        `Object.fromEntries(verificationCodes.map(...))` silently collapses
+        them to whichever comes last when building `Metadata.verification.
+        other` - a plausible copy-paste mistake that would otherwise drop
+        data with no error anywhere in the chain. Exact-string match (not
+        case-insensitive): meta-tag names are conventionally lowercase and an
+        exact duplicate is what actually collides in `Object.fromEntries`."""
+        seen: set[str] = set()
+        for code in value:
+            if code.name in seen:
+                raise ValueError(f"duplicate verification code name: {code.name!r}")
+            seen.add(code.name)
+        return value
 
 
 class SiteSettingsUpdate(SiteSettingsBase):
