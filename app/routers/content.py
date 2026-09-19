@@ -135,13 +135,22 @@ follow-up - see `content_page.py`'s module docstring's
 `RESERVED_TOP_LEVEL_SLUGS` section for the gap this closes): public,
 unauthenticated, backed by
 `app/services/content/content_pages_service.py::list_published_slugs`.
-Returns a flat JSON array of every currently-*published* page's slug - the
-sole consumer is the frontend repo's deploy-time route-collision-check
-script (a separate session's work, not built here), which diffs this list
-against `frontend/app/`'s real top-level route folder names and fails the
-frontend deploy loudly on any collision, closing the gap where
-`RESERVED_TOP_LEVEL_SLUGS` is a point-in-time snapshot that could silently
-drift out of sync with new routes.
+Returns a flat JSON array of every currently-*published* page's slug.
+Originally built with a single consumer in mind - the frontend repo's
+deploy-time route-collision-check script (a separate session's work, not
+built here), which diffs this list against `frontend/app/`'s real top-level
+route folder names and fails the frontend deploy loudly on any collision,
+closing the gap where `RESERVED_TOP_LEVEL_SLUGS` is a point-in-time snapshot
+that could silently drift out of sync with new routes.
+
+**Update (ADR-013 cutover PR, 2026-09-19):** this route now has a second,
+permanent consumer - `frontend/app/sitemap.ts`, a live production request
+path (not a deploy-time script), which calls this on every `/sitemap.xml`
+rebuild to include published Dynamic Pages in the sitemap. That page caches
+its own result for 1 hour (`export const revalidate = 3600`) specifically so
+crawler traffic to `/sitemap.xml` doesn't multiply into repeated live calls
+here, but this endpoint's `60/minute` rate limit should still be sized with
+both callers' combined traffic in mind if either one's frequency changes.
 
 **Deliberately registered as a flat sibling under `/content` - `/page-slugs`
 - never nested under `/pages`.** `GET /v1/content/pages/{slug}` is a
