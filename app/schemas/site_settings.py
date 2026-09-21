@@ -95,26 +95,37 @@ inherits `extra="forbid"` from `SiteSettingsBase` — it doesn't declare those f
 unpacking the raw dict raises a validation error on every document that actually exists
 (caught by `test-runner` before merge: every `GET` after any write, and the write path's
 own re-read, 500'd). Validate the raw doc through `SiteSettingsDocument` first (which does
-declare those fields), then narrow to just the two Round 1 fields for the response shape —
+declare those fields), then narrow to just the `SiteSettingsBase` fields for the response shape —
 see `app/services/content/site_settings_service.py`'s `_to_read()` helper, the one place
 this pattern is actually implemented.
 
-## Round 2 extensibility (do not build now)
+## Round 2 (implemented): raw `<head>`/`<body>` code injection
 
-Round 2 (gated behind a not-yet-approved ADR, continuing from ADR-023 — see
-the 2026-09-19 spec-approval entry) will add `head_injection_code`/
+Round 2 (ADR-024, "Admin Custom Code Injection trust boundary" — now
+Approved, continuing from ADR-023) adds `head_injection_code`/
 `body_injection_code` fields to this *same* singleton document — deliberately
 not a new collection, since it's the same one "site settings" object growing
 new fields, and Mongo documents don't need a migration to gain new optional
-fields on existing rows. Nothing in this file's shape blocks that: `_id`,
-`created_at`/`updated_at`, and the singleton read/write mechanism above are
-all field-count-agnostic. When Round 2 is approved, its two new fields get
-added directly to `SiteSettingsBase` (so `SiteSettingsUpdate`/`Document`/
-`Read` all inherit them automatically, same as every other field here) —
-**do not** design Round 2 as a separate model/collection/endpoint bolted on
-next to this one. No field, validator, or docstring in this file assumes
-"exactly these two fields" as a closed set; the two Round 1 fields below are
-simply the only ones declared so far.
+fields on existing rows. `_id`, `created_at`/`updated_at`, and the singleton
+read/write mechanism above are all field-count-agnostic and needed no changes
+for this. The two new fields are declared directly on `SiteSettingsBase` (so
+`SiteSettingsUpdate`/`Document`/`Read` all inherit them automatically, same as
+every other field here) — no separate model/collection/endpoint, no new
+route: the existing `GET`/`PUT /v1/content/site-settings` routes carry the
+full shape once the schema gains the fields.
+
+Per ADR-024's Decision: **no sanitization pipeline runs on these two fields,
+at any layer, ever** — ADR-024 places the trust boundary at `require_admin`
+itself (an admin account is already fully trusted, the same posture as
+letting an admin edit `ads_txt_content` above), not at a content-sanitization
+layer. The frontend renders both fields verbatim (`head_injection_code` via
+`next/script`/raw head injection, `body_injection_code` via raw body
+injection) — see ADR-024 for the full trust-boundary reasoning and why a
+`<script>`-stripping/allowlist pipeline was explicitly rejected as
+incompatible with the feature's own purpose (real GTM/analytics snippets are
+always `<script>` tags). No field, validator, or docstring in this file
+assumes "exactly these four fields" as a closed set; a future Round 3 would
+follow this same precedent.
 
 ## Field caps and why
 
@@ -180,6 +191,33 @@ known injection vector here today — it is purely a data-quality guard against
 copy-paste mistakes, e.g. an admin accidentally including a trailing newline
 from clipboard content).
 
+- `head_injection_code`/`body_injection_code: str`, each capped at
+  `max_length=20000` (~20KB), no `min_length` (empty string is the valid,
+  expected "not configured yet" default, same posture as `ads_txt_content`
+  above). A real GTM/analytics/pixel snippet is typically well under 5KB, so
+  20KB is deliberately generous headroom over the realistic case — sized
+  consistently with `ads_txt_content`'s own "generous, not tight" cap
+  philosophy rather than a short-string field, while still bounded for the
+  same "no unbounded document field served unauthenticated-read/
+  authenticated-write with no size ceiling" reasoning `verification_codes`'
+  cap above and `content_page.py`'s `blocks` cap both already establish.
+  **No control-character rejection the way `SiteVerificationCode.name`/
+  `.content` get**: those are single-line HTML-attribute values where a
+  stray newline is a copy-paste mistake; these two fields are deliberately
+  multi-line code (real `<script>` snippets have newlines/tabs throughout),
+  so reusing `_reject_blank_or_control_chars` here would reject every
+  legitimate value. Instead, `_reject_blank_or_control_chars_only_when_nonempty`
+  (below) only rejects a *non-empty* value that is nothing but whitespace/
+  control characters end-to-end (e.g. a stray pasted newline with no real
+  code) — the empty-string default itself is always valid and never
+  rejected, per ADR-024's Decision section ("may still cap length and reject
+  blank/control-character-only values" — read literally: blank-or-control-
+  character-*only*, not "empty", and not "contains any control character").
+  **No HTML/script sanitization of any kind runs on either field, at any
+  layer** — see this module's "Round 2 (implemented)" section above and
+  ADR-024 directly for why that is the deliberate, approved design, not an
+  oversight.
+
 ## Indexing decision: **no index beyond the default `_id` index**
 
 Confirmed, not assumed: MongoDB automatically creates and unconditionally
@@ -189,8 +227,8 @@ path and the write path above *always* address the single document directly
 by its known `_id` (`SITE_SETTINGS_SINGLETON_ID`), that automatic index is
 already the fastest possible access path (a point lookup by primary key) —
 there is no secondary field this collection is ever filtered/sorted by (no
-`slug`, no `status`, no `order`; the whole collection is one document with
-two top-level fields), so there is nothing left for a custom
+`slug`, no `status`, no `order`; the whole collection is one document with a
+handful of top-level fields), so there is nothing left for a custom
 `db.site_settings.create_index(...)` call to usefully index. This is a
 sharper version of `content_tool_metadata.py`'s/`content_page.py`'s "tiny
 collection, index only what's actually queried" reasoning — not just tiny,
@@ -217,25 +255,26 @@ the one document's insert is an implicit, transparent side effect of the
 first `PUT`'s `upsert=True` (see "Singleton mechanism" above), not a distinct
 API operation with its own request shape. What this file has instead:
 
-- `SiteSettingsBase` — the two Round 1 fields, shared by every other shape
+- `SiteSettingsBase` — the two Round 1 fields plus Round 2's
+  `head_injection_code`/`body_injection_code`, shared by every other shape
   below. `extra="forbid"`, matching this codebase's default convention on
-  every other schema in this feature family; this does not block Round 2's
-  planned field additions (see above) since those are added as new fields on
-  this same class in a future code change, not accepted as unvalidated
-  extras today.
+  every other schema in this feature family; a future Round 3 would add its
+  fields here the same way, not as accepted-but-unvalidated extras.
 - `SiteSettingsUpdate(SiteSettingsBase)` — the `PUT /v1/content/site-settings`
-  request body. Both fields are **required** (inherited as required from
-  `Base`, no `Optional`/partial-update split the way `HomepageSectionUpdate`
-  offers) — a deliberate, simpler choice than a partial-update model:
+  request body. Round 2's `head_injection_code`/`body_injection_code` are
+  **required** (overridden without defaults on this class, so an omitted
+  field is a 422 rather than silently wiping stored code); the Round 1
+  fields keep their Base defaults. No `Optional`/partial-update split the way
+  `HomepageSectionUpdate` offers — a deliberate, simpler choice than a
+  partial-update model:
   `PUT` on a singleton settings resource is naturally a full-replace
-  operation (the admin settings page's form always holds both fields at
+  operation (the admin settings page's form always holds every field at
   once, since there's only one such page and one such document), so the
   service layer never needs partial-merge logic — it can always
-  `$set` both fields directly. If a future UI need ever wants to edit
-  `ads_txt_content` and `verification_codes` independently without
-  resending the other, that would justify revisiting this as two fields on
-  one `Optional`-partial model (or two separate `PATCH`-style endpoints) —
-  not needed for Round 1's spec as approved.
+  `$set` every field directly. If a future UI need ever wants to edit these
+  fields independently without resending the others, that would justify
+  revisiting this as an `Optional`-partial model (or separate `PATCH`-style
+  endpoints) — not needed for Round 1's or Round 2's spec as approved.
 - `SiteSettingsDocument(SiteSettingsBase)` — the real, persisted Mongo
   document shape: adds `id: str` (aliased `_id`, **not** `PyObjectId` — see
   "Singleton mechanism" above for why this field is a plain string here
@@ -243,26 +282,27 @@ API operation with its own request shape. What this file has instead:
   Only ever instantiated from an actual `find_one` result — i.e. only when a
   document already exists.
 - `SiteSettingsRead(SiteSettingsBase)` — the API response shape for both the
-  public `GET` and the admin `PUT`'s response, deliberately just the two
-  Round 1 fields with no `id`/`created_at`/`updated_at` exposed. Neither
-  route's approved spec/acceptance-criteria call for exposing document
-  metadata, and the singleton's identity is structural/well-known anyway (no
-  caller ever needs `_id` to address it — see above), so there's nothing
-  useful `id` would tell an API caller. If a future admin-UI need wants to
-  show a "last updated" timestamp, the admin route can build that response
-  directly from a `SiteSettingsDocument` instead (`updated_at` already lives
-  there) without any schema change here — flagged for backend-builder,
-  not built now since it's outside the approved spec's acceptance criteria.
+  public `GET` and the admin `PUT`'s response, deliberately just the
+  `SiteSettingsBase` fields with no `id`/`created_at`/`updated_at` exposed.
+  Neither route's approved spec/acceptance-criteria call for exposing
+  document metadata, and the singleton's identity is structural/well-known
+  anyway (no caller ever needs `_id` to address it — see above), so there's
+  nothing useful `id` would tell an API caller. If a future admin-UI need
+  wants to show a "last updated" timestamp, the admin route can build that
+  response directly from a `SiteSettingsDocument` instead (`updated_at`
+  already lives there) without any schema change here — flagged for
+  backend-builder, not built now since it's outside the approved spec's
+  acceptance criteria.
 - `default_site_settings()` — returns
-  `SiteSettingsRead(ads_txt_content="", verification_codes=[])`, the sane
-  empty-defaults object the service layer's `GET` path returns when no
-  document exists yet (see "Seedless by design" above). A plain function, not
-  a classmethod on `SiteSettingsRead`, purely so it reads clearly at the call
-  site (`default_site_settings()`) — no behavioral difference either way.
+  `SiteSettingsRead(ads_txt_content="", verification_codes=[],
+  head_injection_code="", body_injection_code="")`, the sane empty-defaults
+  object the service layer's `GET` path returns when no document exists yet
+  (see "Seedless by design" above). A plain function, not a classmethod on
+  `SiteSettingsRead`, purely so it reads clearly at the call site
+  (`default_site_settings()`) — no behavioral difference either way.
 """
 
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -285,6 +325,28 @@ def _reject_blank_or_control_chars(value: str, *, field_name: str) -> str:
         raise ValueError(f"{field_name} must not be empty or whitespace-only")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise ValueError(f"{field_name} must not contain control characters (e.g. newlines/tabs)")
+    return value
+
+
+def _reject_blank_or_control_chars_only_when_nonempty(value: str, *, field_name: str) -> str:
+    """Shared validator body for `head_injection_code`/`body_injection_code`
+    — see module docstring's "Field caps and why" section for the full
+    reasoning. Deliberately **not** a reuse of `_reject_blank_or_control_chars`
+    above: these two fields are multi-line code (real `<script>` snippets have
+    newlines/tabs throughout), so rejecting any control character would break
+    every legitimate value. The empty string is always valid (the "not
+    configured yet" default, per ADR-024) and is never rejected here; only a
+    *non-empty* value that reduces to nothing once whitespace and non-printable
+    control characters are stripped out (e.g. a stray pasted newline with no
+    real code) is rejected, per ADR-024's "reject blank/control-character-only
+    values" — read as "blank-or-control-character-*only*", not "empty" and not
+    "contains any control character".
+    """
+    if value == "":
+        return value
+    printable = "".join(ch for ch in value if not (ch.isspace() or ord(ch) < 32 or ord(ch) == 127))
+    if not printable:
+        raise ValueError(f"{field_name} must not be blank or control-character-only")
     return value
 
 
@@ -330,9 +392,9 @@ class SiteVerificationCode(BaseModel):
 
 
 class SiteSettingsBase(BaseModel):
-    """Round 1 fields only. See module docstring's "Round 2 extensibility"
-    section — future `head_injection_code`/`body_injection_code` fields are
-    added directly here, not on a separate model."""
+    """Round 1 fields (`ads_txt_content`, `verification_codes`) plus Round 2's
+    `head_injection_code`/`body_injection_code` (ADR-024, now Approved and
+    implemented) — see module docstring's "Round 2 (implemented)" section."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -354,6 +416,30 @@ class SiteSettingsBase(BaseModel):
             "Provider-agnostic list of {name, content} search-engine "
             "verification entries — see SiteVerificationCode. Capped at 50, "
             "not the exact count of known providers — see module docstring."
+        ),
+    )
+    head_injection_code: str = Field(
+        default="",
+        max_length=20000,
+        description=(
+            "Raw HTML/JS injected verbatim into every public page's <head> "
+            "(e.g. a GTM/analytics snippet) — no sanitization pipeline runs "
+            "on this value at any layer, per ADR-024's Decision. Empty "
+            "string is the valid 'not configured yet' default; see module "
+            "docstring's 'Field caps and why' section for the cap and "
+            "validator reasoning."
+        ),
+    )
+    body_injection_code: str = Field(
+        default="",
+        max_length=20000,
+        description=(
+            "Raw HTML/JS injected verbatim into every public page's <body> "
+            "(e.g. a noscript pixel/chat-widget snippet) — no sanitization "
+            "pipeline runs on this value at any layer, per ADR-024's "
+            "Decision. Empty string is the valid 'not configured yet' "
+            "default; see module docstring's 'Field caps and why' section "
+            "for the cap and validator reasoning."
         ),
     )
 
@@ -378,13 +464,44 @@ class SiteSettingsBase(BaseModel):
             seen.add(code.name)
         return value
 
+    @field_validator("head_injection_code")
+    @classmethod
+    def _validate_head_injection_code(cls, value: str) -> str:
+        return _reject_blank_or_control_chars_only_when_nonempty(value, field_name="head_injection_code")
+
+    @field_validator("body_injection_code")
+    @classmethod
+    def _validate_body_injection_code(cls, value: str) -> str:
+        return _reject_blank_or_control_chars_only_when_nonempty(value, field_name="body_injection_code")
+
 
 class SiteSettingsUpdate(SiteSettingsBase):
     """Request body for `PUT /v1/content/site-settings` (admin,
-    `require_admin`). Both fields required — a full-replace PUT, not a
-    partial update. See module docstring's "Shape notes" section for why
-    this is a deliberately simpler choice than an `Optional`-partial model
-    here."""
+    `require_admin`). Full-replace PUT, not a partial update.
+    `head_injection_code`/`body_injection_code` are overridden here as
+    REQUIRED (no default) even though `SiteSettingsBase` defaults them to
+    "": a PUT that omits them would otherwise silently overwrite stored
+    injected code with "" (code-reviewer finding). The inherited validator
+    and 20000 cap still apply. `ads_txt_content`/`verification_codes` keep
+    their Base defaults (Round 1 behavior, unchanged). See module docstring's
+    "Shape notes" section."""
+
+    head_injection_code: str = Field(
+        ...,
+        max_length=20000,
+        description=(
+            "Required on PUT (send \"\" to clear) - see SiteSettingsBase."
+            "head_injection_code."
+        ),
+    )
+    body_injection_code: str = Field(
+        ...,
+        max_length=20000,
+        description=(
+            "Required on PUT (send \"\" to clear) - see SiteSettingsBase."
+            "body_injection_code."
+        ),
+    )
 
 
 class SiteSettingsDocument(SiteSettingsBase):
@@ -411,10 +528,11 @@ class SiteSettingsDocument(SiteSettingsBase):
 
 class SiteSettingsRead(SiteSettingsBase):
     """API response shape for both `GET /v1/content/site-settings` (public)
-    and `PUT /v1/content/site-settings` (admin) — just the Round 1 fields,
-    no document metadata exposed. See module docstring's "Shape notes"
-    section for why `id`/`created_at`/`updated_at` are deliberately absent
-    here even though `SiteSettingsDocument` carries them."""
+    and `PUT /v1/content/site-settings` (admin) — just the `SiteSettingsBase`
+    fields (Round 1 + Round 2), no document metadata exposed. See module
+    docstring's "Shape notes" section for why `id`/`created_at`/`updated_at`
+    are deliberately absent here even though `SiteSettingsDocument` carries
+    them."""
 
 
 def default_site_settings() -> SiteSettingsRead:
@@ -428,4 +546,9 @@ def default_site_settings() -> SiteSettingsRead:
     side-effect-free (see module docstring's "Seedless by design" section).
     """
 
-    return SiteSettingsRead(ads_txt_content="", verification_codes=[])
+    return SiteSettingsRead(
+        ads_txt_content="",
+        verification_codes=[],
+        head_injection_code="",
+        body_injection_code="",
+    )

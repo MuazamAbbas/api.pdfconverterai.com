@@ -48,6 +48,7 @@ from app.core.security import verify_api_key
 from app.routers import content as content_router
 from app.schemas.site_settings import (
     SITE_SETTINGS_SINGLETON_ID,
+    SiteSettingsRead,
     SiteSettingsUpdate,
     SiteVerificationCode,
     default_site_settings,
@@ -193,6 +194,9 @@ def _valid_put_body(**overrides) -> dict:
                 {"name": "msvalidate.01", "content": "def456"},
             ],
         ),
+        # Required on SiteSettingsUpdate (a PUT omitting them would wipe stored code)
+        "head_injection_code": overrides.get("head_injection_code", ""),
+        "body_injection_code": overrides.get("body_injection_code", ""),
     }
     return payload
 
@@ -209,7 +213,12 @@ def test_default_site_settings_is_all_empty():
 
 
 def test_ads_txt_content_within_limit_accepted():
-    model = SiteSettingsUpdate(ads_txt_content="a" * 50000, verification_codes=[])
+    model = SiteSettingsUpdate(
+        ads_txt_content="a" * 50000,
+        verification_codes=[],
+        head_injection_code="",
+        body_injection_code="",
+    )
     assert len(model.ads_txt_content) == 50000
 
 
@@ -220,7 +229,12 @@ def test_ads_txt_content_over_limit_rejected():
 
 def test_verification_codes_at_cap_accepted():
     codes = [{"name": f"provider-{i}", "content": f"code-{i}"} for i in range(50)]
-    model = SiteSettingsUpdate(ads_txt_content="", verification_codes=codes)
+    model = SiteSettingsUpdate(
+        ads_txt_content="",
+        verification_codes=codes,
+        head_injection_code="",
+        body_injection_code="",
+    )
     assert len(model.verification_codes) == 50
 
 
@@ -255,7 +269,77 @@ def test_verification_code_valid_accepted():
 
 def test_site_settings_update_forbids_extra_fields():
     with pytest.raises(ValidationError):
-        SiteSettingsUpdate(ads_txt_content="", verification_codes=[], head_injection_code="<script></script>")
+        SiteSettingsUpdate(ads_txt_content="", verification_codes=[], not_a_real_field="x")
+
+
+# --- Round 2: head_injection_code / body_injection_code (ADR-024) ----------
+
+_INJECTION_FIELDS = ["head_injection_code", "body_injection_code"]
+_GTM_SNIPPET = (
+    "<script>\n"
+    "\t(function(w,d,s,l,i){w[l]=w[l]||[];\n"
+    "\t  w[l].push({'gtm.start': new Date().getTime()});\n"
+    "\t})(window,document,'script','dataLayer','GTM-XXXX');\n"
+    "</script>\n"
+)
+
+
+def _injection_payload(field, value):
+    """Full valid PUT body with one injection field set (both are required)."""
+    return _valid_put_body(**{field: value})
+
+
+def test_default_site_settings_injection_fields_empty():
+    defaults = default_site_settings()
+    assert defaults.head_injection_code == ""
+    assert defaults.body_injection_code == ""
+
+
+@pytest.mark.parametrize("field", _INJECTION_FIELDS)
+def test_injection_field_empty_string_accepted(field):
+    model = SiteSettingsUpdate(**_injection_payload(field, ""))
+    assert getattr(model, field) == ""
+
+
+@pytest.mark.parametrize("field", _INJECTION_FIELDS)
+def test_injection_field_multiline_script_accepted_verbatim(field):
+    model = SiteSettingsUpdate(**_injection_payload(field, _GTM_SNIPPET))
+    assert getattr(model, field) == _GTM_SNIPPET  # not stripped, not altered
+
+
+@pytest.mark.parametrize("field", _INJECTION_FIELDS)
+@pytest.mark.parametrize("bad", ["   ", "\n", "\t", "\r\n", " \n\t ", "\x00", "\x07\x1f", "\x7f", "\n\x00\n"])
+def test_injection_field_blank_or_control_only_rejected(field, bad):
+    with pytest.raises(ValidationError):
+        SiteSettingsUpdate(**_injection_payload(field, bad))
+
+
+@pytest.mark.parametrize("field", _INJECTION_FIELDS)
+def test_injection_field_length_boundary(field):
+    assert len(getattr(SiteSettingsUpdate(**_injection_payload(field, "a" * 20000)), field)) == 20000
+    with pytest.raises(ValidationError):
+        SiteSettingsUpdate(**_injection_payload(field, "a" * 20001))
+
+
+@pytest.mark.parametrize("field", _INJECTION_FIELDS)
+def test_injection_field_script_tags_not_sanitized(field):
+    raw = "<script src=\"https://x.example/a.js\"></script><img src=x onerror=alert(1)>"
+    assert getattr(SiteSettingsUpdate(**_injection_payload(field, raw)), field) == raw
+
+
+@pytest.mark.parametrize("omitted", _INJECTION_FIELDS)
+def test_injection_fields_required_on_update_when_omitted(omitted):
+    # A PUT omitting either field must 422, not silently wipe stored code.
+    payload = _valid_put_body()
+    del payload[omitted]
+    with pytest.raises(ValidationError):
+        SiteSettingsUpdate(**payload)
+
+
+def test_injection_fields_still_default_on_read_and_document_shapes():
+    read = SiteSettingsRead(ads_txt_content="x")
+    assert read.head_injection_code == ""
+    assert read.body_injection_code == ""
 
 
 # ===========================================================================
@@ -300,6 +384,43 @@ async def test_get_site_settings_when_document_exists_does_not_500():
     assert len(result.verification_codes) == 1
 
 
+async def test_round2_injection_fields_round_trip_through_service():
+    body = SiteSettingsUpdate(
+        ads_txt_content="x",
+        head_injection_code=_GTM_SNIPPET,
+        body_injection_code="<noscript><iframe src=\"https://t.example\"></iframe></noscript>",
+    )
+    result = await update_site_settings(body)
+    assert result.head_injection_code == _GTM_SNIPPET
+    assert result.body_injection_code == body.body_injection_code
+
+    doc = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
+    assert doc["head_injection_code"] == _GTM_SNIPPET
+    assert doc["body_injection_code"] == body.body_injection_code
+
+    fetched = await get_site_settings()
+    assert fetched.head_injection_code == _GTM_SNIPPET
+    assert fetched.body_injection_code == body.body_injection_code
+
+
+async def test_pre_round2_stored_doc_without_injection_fields_falls_back_to_empty():
+    from datetime import datetime
+
+    await db.site_settings.insert_one(
+        {
+            "_id": SITE_SETTINGS_SINGLETON_ID,
+            "ads_txt_content": "legacy",
+            "verification_codes": [],
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+    )
+    result = await get_site_settings()
+    assert result.ads_txt_content == "legacy"
+    assert result.head_injection_code == ""
+    assert result.body_injection_code == ""
+
+
 async def test_update_site_settings_persists_both_fields():
     body = SiteSettingsUpdate(**_valid_put_body())
     result = await update_site_settings(body)
@@ -322,6 +443,8 @@ async def test_update_site_settings_upsert_is_a_true_singleton_not_accumulating(
     second_body = SiteSettingsUpdate(
         ads_txt_content="second content",
         verification_codes=[{"name": "yandex-verification", "content": "xyz789"}],
+        head_injection_code="",
+        body_injection_code="",
     )
     result = await update_site_settings(second_body)
 
@@ -343,7 +466,12 @@ async def test_update_site_settings_preserves_created_at_across_second_update():
     doc_after_first = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
     created_at_first = doc_after_first["created_at"]
 
-    second_body = SiteSettingsUpdate(ads_txt_content="updated", verification_codes=[])
+    second_body = SiteSettingsUpdate(
+        ads_txt_content="updated",
+        verification_codes=[],
+        head_injection_code="",
+        body_injection_code="",
+    )
     await update_site_settings(second_body)
     doc_after_second = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
 
@@ -363,6 +491,53 @@ async def test_public_get_site_settings_no_document_returns_200_empty_defaults(c
     assert body["success"] is True
     assert body["data"]["ads_txt_content"] == ""
     assert body["data"]["verification_codes"] == []
+    assert body["data"]["head_injection_code"] == ""
+    assert body["data"]["body_injection_code"] == ""
+
+
+async def test_put_and_get_envelope_include_injection_fields_verbatim(client, api_key, admin_cookie):
+    payload = _valid_put_body()
+    payload["head_injection_code"] = _GTM_SNIPPET
+    payload["body_injection_code"] = "<script>window.x=1</script>"
+    put_resp = await client.put(
+        "/v1/content/site-settings", headers=_auth_headers(api_key), cookies=admin_cookie, json=payload
+    )
+    assert put_resp.status_code == 200, put_resp.text
+    put_data = put_resp.json()["data"]
+    assert set(put_data) == {"ads_txt_content", "verification_codes", "head_injection_code", "body_injection_code"}
+    assert put_data["head_injection_code"] == _GTM_SNIPPET
+    assert put_data["body_injection_code"] == "<script>window.x=1</script>"
+
+    get_data = (await client.get("/v1/content/site-settings")).json()["data"]
+    assert get_data == put_data
+
+
+async def test_put_site_settings_injection_without_admin_cookie_401(client, api_key):
+    payload = _valid_put_body()
+    payload["head_injection_code"] = "<script>evil()</script>"
+    resp = await client.put("/v1/content/site-settings", headers=_auth_headers(api_key), json=payload)
+    assert resp.status_code == 401, resp.text
+    assert await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID}) is None
+
+
+@pytest.mark.parametrize(
+    "bad_body",
+    [
+        {"head_injection_code": "  \n "},
+        {"body_injection_code": "\x00"},
+        {"head_injection_code": "a" * 20001},
+        {"body_injection_code": "a" * 20001},
+    ],
+)
+async def test_put_site_settings_invalid_injection_rejected_422(client, api_key, admin_cookie, bad_body):
+    resp = await client.put(
+        "/v1/content/site-settings",
+        headers=_auth_headers(api_key),
+        cookies=admin_cookie,
+        json={**_valid_put_body(), **bad_body},
+    )
+    assert resp.status_code == 422, resp.text
+    assert await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID}) is None
 
 
 async def test_public_get_site_settings_requires_no_auth(client):
@@ -396,7 +571,9 @@ async def test_put_site_settings_requires_api_key_layer_invalid_key_403(client, 
     assert resp.status_code == 403, resp.text
 
 
-async def test_put_site_settings_requires_api_key_layer_wrong_category_403(client, admin_cookie, wrong_category_api_key):
+async def test_put_site_settings_requires_api_key_layer_wrong_category_403(
+    client, admin_cookie, wrong_category_api_key
+):
     resp = await client.put(
         "/v1/content/site-settings",
         headers=_auth_headers(wrong_category_api_key),
@@ -518,6 +695,8 @@ async def test_put_site_settings_twice_replaces_not_accumulates_via_http(client,
         json={
             "ads_txt_content": "second via http",
             "verification_codes": [{"name": "bing-verification", "content": "bing123"}],
+            "head_injection_code": "",
+            "body_injection_code": "",
         },
     )
     assert second_resp.status_code == 200, second_resp.text
@@ -532,3 +711,23 @@ async def test_put_site_settings_twice_replaces_not_accumulates_via_http(client,
     get_body = get_resp.json()["data"]
     assert get_body["ads_txt_content"] == "second via http"
     assert len(get_body["verification_codes"]) == 1
+
+
+async def test_put_site_settings_omitting_injection_fields_422_and_preserves_stored_code(client, api_key, admin_cookie):
+    """Omitting the injection fields must 422 rather than wipe stored code."""
+    first = await client.put(
+        "/v1/content/site-settings",
+        headers=_auth_headers(api_key),
+        cookies=admin_cookie,
+        json=_valid_put_body(head_injection_code="<script>keep()</script>"),
+    )
+    assert first.status_code == 200, first.text
+    resp = await client.put(
+        "/v1/content/site-settings",
+        headers=_auth_headers(api_key),
+        cookies=admin_cookie,
+        json={"ads_txt_content": "x", "verification_codes": []},
+    )
+    assert resp.status_code == 422
+    doc = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
+    assert doc["head_injection_code"] == "<script>keep()</script>"
