@@ -1,9 +1,10 @@
 """`site_settings` singleton document read/write for the `content` module
 (ADR-021's module boundary) - Admin-managed SEO & site-verification settings,
-Round 1 (ads.txt + verification codes). Founder-approved spec, see
-`docs/roadmap/SPRINT_STATUS.md`'s 2026-09-19 "Spec approved: Admin-managed
-SEO & site-verification settings (Round 1: ads.txt + verification codes)"
-entry.
+Round 1 (ads.txt + verification codes) and Round 2 (`head_injection_code`/
+`body_injection_code` raw code injection, ADR-024, now Approved).
+Founder-approved spec, see `docs/roadmap/SPRINT_STATUS.md`'s 2026-09-19
+"Spec approved: Admin-managed SEO & site-verification settings (Round 1:
+ads.txt + verification codes)" entry.
 
 Owns every read/write against `db.site_settings`, mirroring
 `app/services/content/categories_service.py`'s "one module owns its
@@ -38,7 +39,8 @@ logger = logging.getLogger(__name__)
 
 
 def _to_read(doc: dict) -> SiteSettingsRead:
-    """`SiteSettingsRead` only declares the two Round 1 fields and inherits
+    """`SiteSettingsRead` only declares the `SiteSettingsBase` fields (Round 1
+    + Round 2's `head_injection_code`/`body_injection_code`) and inherits
     `extra="forbid"` from `SiteSettingsBase`, but a real `site_settings`
     document always also carries `_id`/`created_at`/`updated_at` - unpacking
     the raw doc directly (`SiteSettingsRead(**doc)`) raises a validation
@@ -47,13 +49,15 @@ def _to_read(doc: dict) -> SiteSettingsRead:
     `SiteSettingsDocument` first (which does declare those fields, and gives
     this the same real-validation-of-the-persisted-shape guarantee every
     other read path in this codebase gets, rather than trusting the raw dict
-    blindly), then narrow to just the two Round 1 fields for the response
-    shape - `code-reviewer` flagged `SiteSettingsDocument` as unused dead code
-    before this."""
+    blindly), then narrow to just the `SiteSettingsBase` fields for the
+    response shape - `code-reviewer` flagged `SiteSettingsDocument` as unused
+    dead code before this."""
     validated = SiteSettingsDocument(**doc)
     return SiteSettingsRead(
         ads_txt_content=validated.ads_txt_content,
         verification_codes=validated.verification_codes,
+        head_injection_code=validated.head_injection_code,
+        body_injection_code=validated.body_injection_code,
     )
 
 
@@ -80,6 +84,8 @@ async def update_site_settings(body: SiteSettingsUpdate) -> SiteSettingsRead:
             "$set": {
                 "ads_txt_content": body.ads_txt_content,
                 "verification_codes": [vc.model_dump() for vc in body.verification_codes],
+                "head_injection_code": body.head_injection_code,
+                "body_injection_code": body.body_injection_code,
                 "updated_at": now,
             },
             "$setOnInsert": {"created_at": now},

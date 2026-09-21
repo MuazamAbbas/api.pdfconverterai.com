@@ -181,19 +181,23 @@ Kept consistent with that policy rather than left as the one exception.
 
 Also carries the Admin-managed SEO & site-verification settings routes,
 Round 1 (ads.txt + verification codes; feature spec approved per
-`docs/roadmap/SPRINT_STATUS.md`'s 2026-09-19 entry): public
-`GET /v1/content/site-settings` and admin `PUT /v1/content/site-settings`,
-backed by `app/services/content/site_settings_service.py`. Same `content`
-module, same `/content` prefix, same two-router split, no new router
-registration. `site_settings` is a true singleton collection (exactly one
-document, addressed by a fixed `_id` - see
-`app/schemas/site_settings.py`'s module docstring), so unlike every other
-resource in this router there is no id/slug path parameter on either route -
-`GET` returns sane empty defaults before any admin write ever happens
-(never a 404, never an implicit insert), and `PUT` is a full-replace upsert.
-Round 2 (`head_injection_code`/`body_injection_code`, raw HTML injection) is
-explicitly out of scope until a separate ADR is approved - do not add those
-fields/routes here without one.
+`docs/roadmap/SPRINT_STATUS.md`'s 2026-09-19 entry) plus Round 2
+(`head_injection_code`/`body_injection_code` raw `<head>`/`<body>` code
+injection, ADR-024 "Admin Custom Code Injection trust boundary" - now
+Approved): public `GET /v1/content/site-settings` and admin
+`PUT /v1/content/site-settings`, backed by
+`app/services/content/site_settings_service.py`. Same `content` module, same
+`/content` prefix, same two-router split, no new router registration for
+Round 2 either - the schema simply gained two more fields on the same
+singleton document, see `app/schemas/site_settings.py`'s module docstring.
+`site_settings` is a true singleton collection (exactly one document,
+addressed by a fixed `_id`), so unlike every other resource in this router
+there is no id/slug path parameter on either route - `GET` returns sane
+empty defaults before any admin write ever happens (never a 404, never an
+implicit insert), and `PUT` is a full-replace upsert. Per ADR-024's
+Decision, `head_injection_code`/`body_injection_code` pass through this
+router with **no sanitization** at any layer - the trust boundary is
+`require_admin` itself, not a content-sanitization pipeline.
 """
 import logging
 from typing import Optional
@@ -353,6 +357,8 @@ def _site_settings_out(settings) -> dict:
     return {
         "ads_txt_content": settings.ads_txt_content,
         "verification_codes": [vc.model_dump() for vc in settings.verification_codes],
+        "head_injection_code": settings.head_injection_code,
+        "body_injection_code": settings.body_injection_code,
     }
 
 
