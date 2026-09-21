@@ -303,7 +303,6 @@ API operation with its own request shape. What this file has instead:
 """
 
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 

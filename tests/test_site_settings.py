@@ -213,7 +213,12 @@ def test_default_site_settings_is_all_empty():
 
 
 def test_ads_txt_content_within_limit_accepted():
-    model = SiteSettingsUpdate(ads_txt_content="a" * 50000, verification_codes=[], head_injection_code="", body_injection_code="")
+    model = SiteSettingsUpdate(
+        ads_txt_content="a" * 50000,
+        verification_codes=[],
+        head_injection_code="",
+        body_injection_code="",
+    )
     assert len(model.ads_txt_content) == 50000
 
 
@@ -224,7 +229,12 @@ def test_ads_txt_content_over_limit_rejected():
 
 def test_verification_codes_at_cap_accepted():
     codes = [{"name": f"provider-{i}", "content": f"code-{i}"} for i in range(50)]
-    model = SiteSettingsUpdate(ads_txt_content="", verification_codes=codes, head_injection_code="", body_injection_code="")
+    model = SiteSettingsUpdate(
+        ads_txt_content="",
+        verification_codes=codes,
+        head_injection_code="",
+        body_injection_code="",
+    )
     assert len(model.verification_codes) == 50
 
 
@@ -456,7 +466,12 @@ async def test_update_site_settings_preserves_created_at_across_second_update():
     doc_after_first = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
     created_at_first = doc_after_first["created_at"]
 
-    second_body = SiteSettingsUpdate(ads_txt_content="updated", verification_codes=[], head_injection_code="", body_injection_code="")
+    second_body = SiteSettingsUpdate(
+        ads_txt_content="updated",
+        verification_codes=[],
+        head_injection_code="",
+        body_injection_code="",
+    )
     await update_site_settings(second_body)
     doc_after_second = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
 
@@ -556,7 +571,9 @@ async def test_put_site_settings_requires_api_key_layer_invalid_key_403(client, 
     assert resp.status_code == 403, resp.text
 
 
-async def test_put_site_settings_requires_api_key_layer_wrong_category_403(client, admin_cookie, wrong_category_api_key):
+async def test_put_site_settings_requires_api_key_layer_wrong_category_403(
+    client, admin_cookie, wrong_category_api_key
+):
     resp = await client.put(
         "/v1/content/site-settings",
         headers=_auth_headers(wrong_category_api_key),
