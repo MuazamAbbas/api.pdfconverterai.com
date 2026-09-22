@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core.database import db
+from app.core.database import db, ensure_indexes
 from app.core.rate_limiter import limiter
 from app.core.security import verify_api_key
 from app.routers import admin as admin_router
@@ -44,6 +44,25 @@ _ADMIN_EMAIL = "seed-test-admin@pdfconverterai.com"
 _ADMIN_COOKIE_NAME = "admin_session"
 
 logger = logging.getLogger(__name__)
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _ensure_homepage_sections_indexes():
+    """This file builds its own tiny app (see module docstring) with no
+    startup lifespan, so - unlike production's real `app.main` startup,
+    which calls this - nothing here ever creates the
+    `homepage_sections_type_tool_grid_unique` partial unique index that
+    `test_create_duplicate_tool_grid_returns_409` depends on for its 409.
+    CI's `mongodb:7` service container starts empty every run (no
+    persistent local Mongo carrying the index over from an earlier manual
+    `ensure_indexes()` run, unlike a dev machine might), so without this the
+    duplicate insert silently succeeds there and the test asserts 200 == 409.
+    Calls the real `ensure_indexes()` once per test-session run of this
+    module, same as production startup does, so the index genuinely exists
+    before any test in this file runs. Same convention as
+    `tests/test_content_tool_metadata.py::_ensure_content_indexes`."""
+    await ensure_indexes()
+    yield
 
 
 # --- test app scaffolding ------------------------------------------------
