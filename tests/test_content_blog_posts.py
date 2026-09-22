@@ -51,7 +51,7 @@ Covers, roughly in this order:
      request.
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -483,6 +483,17 @@ async def test_pagination_page_size_at_upper_bound_accepted(client):
 
 # --- published_at stamping: create_post -------------------------------------
 
+# BSON/MongoDB datetimes are millisecond precision, not microsecond -
+# `published_at` is stamped in Python (microsecond precision), inserted,
+# then read back post-Mongo-round-trip already truncated to the millisecond
+# boundary. A plain `before <= post.published_at` can spuriously fail when
+# `before`'s own microseconds exceed the truncated millisecond (e.g.
+# before=...037143 but stored/truncated published_at=...037000, which is
+# numerically less than before despite being stamped after it). A 1ms
+# tolerance on the lower bound absorbs that truncation without weakening the
+# assertion's intent (published_at was stamped during [before, after]).
+_MONGO_DATETIME_TRUNCATION_TOLERANCE = timedelta(milliseconds=1)
+
 
 async def test_create_post_born_published_stamps_published_at(created_category_ids, created_blog_slugs):
     category_id = await _insert_blog_category_direct("News", "news-born-published-test-1")
@@ -496,7 +507,11 @@ async def test_create_post_born_published_stamps_published_at(created_category_i
 
     assert post.status == BlogPostStatus.PUBLISHED
     assert post.published_at is not None
-    assert before <= post.published_at <= after
+    assert (
+        before - _MONGO_DATETIME_TRUNCATION_TOLERANCE
+        <= post.published_at
+        <= after + _MONGO_DATETIME_TRUNCATION_TOLERANCE
+    )
 
 
 async def test_create_post_draft_leaves_published_at_none(created_category_ids, created_blog_slugs):
@@ -528,7 +543,11 @@ async def test_update_post_first_publish_stamps_published_at(created_category_id
 
     assert updated.status == BlogPostStatus.PUBLISHED
     assert updated.published_at is not None
-    assert before <= updated.published_at <= after
+    assert (
+        before - _MONGO_DATETIME_TRUNCATION_TOLERANCE
+        <= updated.published_at
+        <= after + _MONGO_DATETIME_TRUNCATION_TOLERANCE
+    )
 
 
 async def test_update_post_already_published_edit_does_not_restamp(created_category_ids, created_blog_slugs):
