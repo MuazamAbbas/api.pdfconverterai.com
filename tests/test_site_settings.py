@@ -387,6 +387,7 @@ async def test_get_site_settings_when_document_exists_does_not_500():
 async def test_round2_injection_fields_round_trip_through_service():
     body = SiteSettingsUpdate(
         ads_txt_content="x",
+        verification_codes=[],
         head_injection_code=_GTM_SNIPPET,
         body_injection_code="<noscript><iframe src=\"https://t.example\"></iframe></noscript>",
     )
@@ -731,3 +732,36 @@ async def test_put_site_settings_omitting_injection_fields_422_and_preserves_sto
     assert resp.status_code == 422
     doc = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
     assert doc["head_injection_code"] == "<script>keep()</script>"
+
+
+async def test_put_site_settings_omitting_ads_txt_content_422_persists_nothing(client, api_key, admin_cookie):
+    """`ads_txt_content` has the exact same wipe risk `head_injection_code`/
+    `body_injection_code` were fixed for (see SiteSettingsUpdate's docstring)
+    - a PUT omitting it must 422, not silently reset it to "" server-side."""
+    payload = _valid_put_body()
+    del payload["ads_txt_content"]
+    resp = await client.put(
+        "/v1/content/site-settings",
+        headers=_auth_headers(api_key),
+        cookies=admin_cookie,
+        json=payload,
+    )
+    assert resp.status_code == 422, resp.text
+    doc = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
+    assert doc is None
+
+
+async def test_put_site_settings_omitting_verification_codes_422_persists_nothing(client, api_key, admin_cookie):
+    """Same wipe-risk fix as `ads_txt_content` above, for `verification_codes`
+    - a PUT omitting it must 422, not silently reset it to [] server-side."""
+    payload = _valid_put_body()
+    del payload["verification_codes"]
+    resp = await client.put(
+        "/v1/content/site-settings",
+        headers=_auth_headers(api_key),
+        cookies=admin_cookie,
+        json=payload,
+    )
+    assert resp.status_code == 422, resp.text
+    doc = await db.site_settings.find_one({"_id": SITE_SETTINGS_SINGLETON_ID})
+    assert doc is None

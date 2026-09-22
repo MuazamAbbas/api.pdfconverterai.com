@@ -261,12 +261,22 @@ API operation with its own request shape. What this file has instead:
   every other schema in this feature family; a future Round 3 would add its
   fields here the same way, not as accepted-but-unvalidated extras.
 - `SiteSettingsUpdate(SiteSettingsBase)` — the `PUT /v1/content/site-settings`
-  request body. Round 2's `head_injection_code`/`body_injection_code` are
-  **required** (overridden without defaults on this class, so an omitted
-  field is a 422 rather than silently wiping stored code); the Round 1
-  fields keep their Base defaults. No `Optional`/partial-update split the way
-  `HomepageSectionUpdate` offers — a deliberate, simpler choice than a
-  partial-update model:
+  request body. **All four fields are required** — `ads_txt_content`,
+  `verification_codes`, `head_injection_code`, `body_injection_code` are
+  every one overridden without defaults on this class, so an omitted field is
+  a 422 rather than silently wiping that field's stored value with its empty
+  default. `head_injection_code`/`body_injection_code` were made required
+  first (Round 2 / ADR-024, original code-reviewer finding); `ads_txt_content`/
+  `verification_codes` were found to have the *exact same* wipe risk in a
+  follow-up review — a PUT omitting `ads_txt_content` would have silently
+  reset it to `""` in production, same class of bug — so they were made
+  required the same way rather than left as the one inconsistent pair. There
+  is deliberately no partial-required split among the four: since `PUT` on
+  this singleton is always a full-replace of the one document (see below),
+  "required unless it's a Round-1-vs-Round-2 field" would be an arbitrary
+  distinction with no basis in the actual risk, which is identical for all
+  four. No `Optional`/partial-update split the way `HomepageSectionUpdate`
+  offers — a deliberate, simpler choice than a partial-update model:
   `PUT` on a singleton settings resource is naturally a full-replace
   operation (the admin settings page's form always holds every field at
   once, since there's only one such page and one such document), so the
@@ -478,14 +488,35 @@ class SiteSettingsBase(BaseModel):
 class SiteSettingsUpdate(SiteSettingsBase):
     """Request body for `PUT /v1/content/site-settings` (admin,
     `require_admin`). Full-replace PUT, not a partial update.
-    `head_injection_code`/`body_injection_code` are overridden here as
-    REQUIRED (no default) even though `SiteSettingsBase` defaults them to
-    "": a PUT that omits them would otherwise silently overwrite stored
-    injected code with "" (code-reviewer finding). The inherited validator
-    and 20000 cap still apply. `ads_txt_content`/`verification_codes` keep
-    their Base defaults (Round 1 behavior, unchanged). See module docstring's
-    "Shape notes" section."""
+    All four fields (`ads_txt_content`, `verification_codes`,
+    `head_injection_code`, `body_injection_code`) are overridden here as
+    REQUIRED (no default) even though `SiteSettingsBase` defaults every one
+    of them: a PUT that omits any field would otherwise silently overwrite
+    that stored value with its empty default (`""`/`[]`) instead of a 422.
+    `head_injection_code`/`body_injection_code` were made required first
+    (ADR-024/Round 2, code-reviewer finding); `ads_txt_content`/
+    `verification_codes` were the exact same footgun from Round 1, just not
+    caught until a follow-up review — same fix, same reasoning, applied
+    consistently across all four fields rather than leaving two of them
+    exposed. The inherited validators and caps (50000/50/20000/20000) still
+    apply unchanged. See module docstring's "Shape notes" section."""
 
+    ads_txt_content: str = Field(
+        ...,
+        max_length=50000,
+        description=(
+            "Required on PUT (send \"\" to clear) - see SiteSettingsBase."
+            "ads_txt_content."
+        ),
+    )
+    verification_codes: list[SiteVerificationCode] = Field(
+        ...,
+        max_length=50,
+        description=(
+            "Required on PUT (send [] to clear) - see SiteSettingsBase."
+            "verification_codes."
+        ),
+    )
     head_injection_code: str = Field(
         ...,
         max_length=20000,
