@@ -126,3 +126,32 @@ async def reset_admin_password(
     )
     doc = await db.admin_users.find_one({"_id": existing["_id"]})
     return AdminUserDocument(**doc)
+
+
+async def delete_admin_user(email: str, operator: Optional[str] = None) -> None:
+    """Used only by `backend/scripts/delete_admin_user.py` - the sole writer
+    for removing an `admin_users` document, mirroring `create_admin_user`'s
+    "script is the only writer" pattern in reverse. No `DELETE` HTTP route
+    exists for this collection, by the same design as `create_admin_user`/
+    `reset_admin_password` (no public/self-service account management for
+    this collection at all).
+
+    Must never be called from a network-reachable path: like
+    `reset_admin_password`, the "no such email" branch raises immediately
+    with no constant-time/dummy-hash guard, so it is a user-enumeration
+    oracle if ever wired behind an HTTP route.
+
+    `operator` is logged alongside the deleted account's id for the same
+    "VPS shell access is the authentication" correlation-aid reasoning
+    `reset_admin_password`'s docstring documents - not an access control."""
+    normalized = _normalize_email(email)
+    existing = await db.admin_users.find_one({"email": normalized})
+    if existing is None:
+        raise ValueError(f"No admin_users document exists for {normalized}")
+    await db.admin_users.delete_one({"_id": existing["_id"]})
+    logger.info(
+        "Deleted admin_users id=%s (email=%s, operator=%s)",
+        existing["_id"],
+        normalized,
+        operator or "unknown",
+    )
