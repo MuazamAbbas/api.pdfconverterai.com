@@ -8,6 +8,9 @@ only reads/updates the lockout fields on an existing document; it never
 inserts one. `backend/scripts/reset_admin_password.py` is the only writer
 for an out-of-band password reset (no `/auth/forgot-password` route exists
 for admin accounts, by design - see that script's docstring).
+`backend/scripts/delete_admin_user.py` is likewise the only writer for
+removing a document from this collection (no `DELETE` HTTP route exists,
+same reasoning - see that script's docstring).
 """
 import logging
 from datetime import datetime, timedelta
