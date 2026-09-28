@@ -8,6 +8,9 @@ only reads/updates the lockout fields on an existing document; it never
 inserts one. `backend/scripts/reset_admin_password.py` is the only writer
 for an out-of-band password reset (no `/auth/forgot-password` route exists
 for admin accounts, by design - see that script's docstring).
+`backend/scripts/delete_admin_user.py` is likewise the only writer for
+removing a document from this collection (no `DELETE` HTTP route exists,
+same reasoning - see that script's docstring).
 """
 import logging
 from datetime import datetime, timedelta
@@ -126,3 +129,41 @@ async def reset_admin_password(
     )
     doc = await db.admin_users.find_one({"_id": existing["_id"]})
     return AdminUserDocument(**doc)
+
+
+async def delete_admin_user(email: str, operator: Optional[str] = None) -> None:
+    """Used only by `backend/scripts/delete_admin_user.py` - the sole writer
+    for removing an `admin_users` document, mirroring `create_admin_user`'s
+    "script is the only writer" pattern in reverse. No `DELETE` HTTP route
+    exists for this collection, by the same design as `create_admin_user`/
+    `reset_admin_password` (no public/self-service account management for
+    this collection at all).
+
+    Must never be called from a network-reachable path: like
+    `reset_admin_password`, the "no such email" branch raises immediately
+    with no constant-time/dummy-hash guard, so it is a user-enumeration
+    oracle if ever wired behind an HTTP route.
+
+    `operator` is logged alongside the deleted account's id for the same
+    "VPS shell access is the authentication" correlation-aid reasoning
+    `reset_admin_password`'s docstring documents - not an access control.
+
+    Unlike `reset_admin_password` (which logs only the id, since the
+    document still exists afterward and the id remains resolvable back to
+    the email via the DB), this logs the email too - deliberately, not an
+    oversight: once deleted, the id alone would be unresolvable for a later
+    audit. An admin email address isn't in Handbook C.10's "never log"
+    category (passwords/tokens/file contents), so this is a safe, intended
+    deviation from the sibling function's logging shape - don't "fix" it
+    back to id-only."""
+    normalized = _normalize_email(email)
+    existing = await db.admin_users.find_one({"email": normalized})
+    if existing is None:
+        raise ValueError(f"No admin_users document exists for {normalized}")
+    await db.admin_users.delete_one({"_id": existing["_id"]})
+    logger.info(
+        "Deleted admin_users id=%s (email=%s, operator=%s)",
+        existing["_id"],
+        normalized,
+        operator or "unknown",
+    )

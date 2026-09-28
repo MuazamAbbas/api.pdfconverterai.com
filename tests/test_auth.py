@@ -168,6 +168,25 @@ async def test_reset_admin_password_updates_hash_and_clears_lockout(seeded_admin
     assert admin_doc["locked_until"] is None
 
 
+async def test_delete_admin_user_rejects_unknown_email():
+    with pytest.raises(ValueError):
+        await admin_user_service.delete_admin_user(
+            email="no-such-admin-for-delete-test@pdfconverterai.com"
+        )
+
+
+async def test_delete_admin_user_removes_the_document(seeded_admin):
+    await admin_user_service.delete_admin_user(email=_TEST_EMAIL, operator="test-operator")
+
+    admin_doc = await db.admin_users.find_one({"_id": seeded_admin.id})
+    assert admin_doc is None
+
+    # Deleting again must fail the same way as any other unknown email -
+    # the document is really gone, not just marked/soft-deleted.
+    with pytest.raises(ValueError):
+        await admin_user_service.delete_admin_user(email=_TEST_EMAIL)
+
+
 # --- password_service -------------------------------------------------
 
 
