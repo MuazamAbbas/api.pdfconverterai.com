@@ -143,7 +143,16 @@ async def delete_admin_user(email: str, operator: Optional[str] = None) -> None:
 
     `operator` is logged alongside the deleted account's id for the same
     "VPS shell access is the authentication" correlation-aid reasoning
-    `reset_admin_password`'s docstring documents - not an access control."""
+    `reset_admin_password`'s docstring documents - not an access control.
+
+    Unlike `reset_admin_password` (which logs only the id, since the
+    document still exists afterward and the id remains resolvable back to
+    the email via the DB), this logs the email too - deliberately, not an
+    oversight: once deleted, the id alone would be unresolvable for a later
+    audit. An admin email address isn't in Handbook C.10's "never log"
+    category (passwords/tokens/file contents), so this is a safe, intended
+    deviation from the sibling function's logging shape - don't "fix" it
+    back to id-only."""
     normalized = _normalize_email(email)
     existing = await db.admin_users.find_one({"email": normalized})
     if existing is None:
