@@ -106,6 +106,7 @@ class DownloadersYoutubeProcessor(Processor):
             if hostname:
                 await assert_host_is_safe(hostname)
         except UnsafeHostError:
+            logger.warning("🚫 Blocked SSRF attempt for YouTube download job: %s", hostname)
             raise PermanentProcessingError(
                 "Cannot download from internal or reserved network addresses"
             )

@@ -60,6 +60,7 @@ def _safe_connector() -> aiohttp.TCPConnector:
     """
     return aiohttp.TCPConnector(resolver=SafeResolver())
 
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/web_tools", tags=["Web Tools"])
@@ -579,6 +580,15 @@ async def ssl_checker(request: DomainRequest, api_key: dict = Depends(verify_api
     try:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _fetch_certificate_der, domain)
+    except UnsafeHostError:
+        # The pre-check above and `_fetch_certificate_der`'s own
+        # `resolve_safe_sync()` call are two separate resolutions in time -
+        # this is the exact DNS-rebinding race #53 targets, caught here
+        # when the pre-check said safe but the pinned resolution moments
+        # later disagreed. Same degrade-cleanly pattern `whois_lookup()`
+        # already uses for its own equivalent case, not a 500.
+        logger.warning("🚫 Blocked SSRF attempt for SSL check: %s", domain)
+        return _empty_ssl_result(domain, _SSRF_BLOCKED_MESSAGE)
     except Exception as e:
         logger.exception("💥 Unexpected error checking SSL certificate for %s: %s", domain, str(e))
         raise api_error(500, "Failed to check SSL certificate", "SSL_CHECK_FAILED")
@@ -714,7 +724,20 @@ class _SafeWhoisSocket(socket.socket):
     def connect(self, address):
         host = address[0] if isinstance(address, tuple) else address
         port = address[1] if isinstance(address, tuple) else None
-        pinned_ip = resolve_safe_sync(host)[0][1]
+        resolved = resolve_safe_sync(host)
+        # `_SafeNICClient.get_socket()` (below) hardcodes `AF_INET` - filter
+        # to that family rather than blindly taking the first resolved
+        # address. A dual-stack referral host whose first `getaddrinfo()`
+        # record happens to be `AF_INET6` would otherwise have this connect
+        # an IPv6 literal on an `AF_INET` socket, raising `socket.gaierror`
+        # - and since `whois`'s `NICClient` swallows socket errors by
+        # default (`ignore_socket_errors=True`), that silently degraded to
+        # a false "No WHOIS data found" instead of erroring loudly
+        # (code-reviewer finding, reproduced live).
+        ipv4_pairs = [ip for family, ip in resolved if family == socket.AF_INET]
+        if not ipv4_pairs:
+            raise socket.gaierror(f"No IPv4 address found for host: {host}")
+        pinned_ip = ipv4_pairs[0]
         return super().connect((pinned_ip, port) if port is not None else pinned_ip)
 
 
