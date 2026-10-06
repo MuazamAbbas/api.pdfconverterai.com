@@ -83,7 +83,20 @@ async def check_url(session: aiohttp.ClientSession, url: str) -> tuple[bool, int
     raises `aiohttp.TooManyRedirects` (a `ClientResponseError` subclass),
     matching what aiohttp itself would raise for the equivalent
     `allow_redirects=True` case - callers already handle `ClientResponseError`
-    generically, so no new except clause was needed for this."""
+    generically, so no new except clause was needed for this.
+
+    DNS-rebinding TOCTOU note (`api.pdfconverterai.com#53`): this function
+    takes no part in closing that gap itself, deliberately - it only ever
+    uses whatever `session` its caller passes in. Every caller that
+    constructs its own session (`app/routers/web_tools.py`'s `validate_url`/
+    `website_down_detector`/`speed_test`, `app/services/seo/seo_audit.py`'s
+    `run_seo_audit`/`_fetch_main_page`) builds it with a `TCPConnector`
+    wired to `app.shared.web.pinned_resolver.SafeResolver`, so the
+    connector's own real DNS resolution for every hop - not just this
+    function's `assert_host_is_safe()` re-validation per hop - is pinned
+    too. Keeping that entirely in how the session is built (not here) is
+    what lets this function's existing scripted-fake-session test suite
+    keep passing unmodified."""
     hostname = urllib.parse.urlparse(url).hostname
     if hostname:
         await assert_host_is_safe(hostname)
