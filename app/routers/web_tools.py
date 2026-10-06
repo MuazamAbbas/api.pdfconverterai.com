@@ -33,8 +33,13 @@ from app.models.web_tools import (
 )
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
 from app.services.jobs.service import create_job, mark_failed, mark_queued
-from app.shared.network_security import UnsafeHostError, assert_host_is_safe, assert_host_is_safe_sync
+from app.shared.network_security import (
+    UnsafeHostError,
+    assert_host_is_safe,
+    resolve_safe_sync,
+)
 from app.shared.responses import api_error, envelope
+from app.shared.web.pinned_resolver import SafeResolver
 from app.shared.web.redirect_fetch import (
     _MAX_REDIRECT_HOPS,
     _REDIRECT_STATUSES,
@@ -42,6 +47,18 @@ from app.shared.web.redirect_fetch import (
     check_url,
 )
 from app.shared.web.speed_trace import _build_speed_trace_config
+
+
+def _safe_connector() -> aiohttp.TCPConnector:
+    """`TCPConnector` wired to `SafeResolver` (Handbook Part C.10 /
+    `api.pdfconverterai.com#53`) - every `aiohttp.ClientSession` in this
+    module that fetches a caller-supplied hostname is built with one of
+    these, so the connector's own real DNS resolution (not just this
+    module's own `assert_host_is_safe()` pre-checks) is also validated,
+    atomically, at the moment of connecting - closing the DNS-rebinding
+    TOCTOU window between a separate check and a separate, later connect.
+    """
+    return aiohttp.TCPConnector(resolver=SafeResolver())
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +223,7 @@ async def validate_url(request: URLRequest, api_key: dict = Depends(verify_api_k
         logger.error("❌ Invalid URL format: %s", _redact_url_credentials(request.url))
         raise HTTPException(status_code=400, detail="Invalid URL format")
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=_safe_connector()) as session:
             is_valid, status = await check_url(session, request.url)
             return {"url": request.url, "is_valid": is_valid, "status_code": status}
     except UnsafeHostError:
@@ -302,7 +319,7 @@ async def website_down_detector(request: URLRequest, api_key: dict = Depends(ver
 
     start = time.monotonic()
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=_safe_connector()) as session:
             is_up, status = await check_url(session, url)
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
         error = None if is_up else "Website returned a non-success status code"
@@ -381,6 +398,14 @@ async def dns_lookup(request: DomainRequest, api_key: dict = Depends(verify_api_
 
     empty_records = {t: [] for t in DNS_RECORD_TYPES}
 
+    # Not subject to the DNS-rebinding TOCTOU (`api.pdfconverterai.com#53`):
+    # this endpoint never connects to `domain`'s own resolved address at
+    # all - `dns.asyncresolver.Resolver()` below only ever talks to the
+    # configured upstream DNS resolver (a fixed, non-user-controlled host),
+    # querying it *about* `domain`. There is no later "real connection to
+    # the address this check validated" step for a rebinding attack to
+    # target, so `assert_host_is_safe()` (a plain safety pre-check, not
+    # `resolve_safe()`/pinning) is the correct guard here, left unchanged.
     try:
         await assert_host_is_safe(domain)
     except UnsafeHostError:
@@ -447,9 +472,32 @@ def _fetch_certificate_der(hostname: str, port: int = 443, timeout: float = 5.0)
     internal failure, same reasoning as `check_url` above. Connection-level
     failures (refused/timeout/DNS/no TLS at all on that port) short-circuit
     with no second attempt and no certificate to report.
+
+    `hostname` is resolved exactly once, via `resolve_safe_sync()`
+    (`api.pdfconverterai.com#53` - DNS-rebinding TOCTOU), and both the
+    verified and the unverified-fallback connection attempts below connect
+    to that same pinned IP - never re-resolving `hostname` themselves. Only
+    the first resolved address is used (no multi-address happy-eyeballs
+    fallback the way a bare `socket.create_connection(hostname, port)`
+    would do internally) - a deliberate, documented trade: trying every
+    resolved address in turn would mean either re-validating each one
+    independently (reopening a smaller version of the same TOCTOU per
+    fallback attempt) or pre-validating all of them up front, which is
+    exactly what happens here, just without the subsequent per-address
+    retry loop. Acceptable for this diagnostic tool. `server_hostname=
+    hostname` (unchanged, both attempts) keeps TLS SNI/cert-hostname
+    validation against the real hostname, never the pinned IP.
     """
     try:
-        with socket.create_connection((hostname, port), timeout=timeout) as sock:
+        resolved = resolve_safe_sync(hostname)
+    except UnsafeHostError:
+        raise
+    except (socket.gaierror, UnicodeError):
+        return {"der": None, "verified": False, "verify_error": None, "connect_error": "dns"}
+    pinned_ip = resolved[0][1]
+
+    try:
+        with socket.create_connection((pinned_ip, port), timeout=timeout) as sock:
             ctx = ssl.create_default_context()
             try:
                 with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
@@ -472,9 +520,10 @@ def _fetch_certificate_der(hostname: str, port: int = 443, timeout: float = 5.0)
         }
 
     # Verification-specific failure above - reconnect once more, unverified,
-    # just to retrieve the certificate's own details for reporting.
+    # just to retrieve the certificate's own details for reporting. Reuses
+    # the same pinned IP resolved above - no second resolution.
     try:
-        with socket.create_connection((hostname, port), timeout=timeout) as sock:
+        with socket.create_connection((pinned_ip, port), timeout=timeout) as sock:
             ctx2 = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ctx2.check_hostname = False
             ctx2.verify_mode = ssl.CERT_NONE
@@ -648,12 +697,25 @@ def _empty_whois_result(domain: str, error: str) -> dict:
 class _SafeWhoisSocket(socket.socket):
     """A `socket.socket` whose `connect()` is SSRF-guarded (Handbook Part
     C.10) before it's allowed to actually connect - see `_SafeNICClient`
-    below for why this exists and exactly what it closes."""
+    below for why this exists and exactly what it closes.
+
+    Resolves `host` exactly once via `resolve_safe_sync()`
+    (`api.pdfconverterai.com#53` - DNS-rebinding TOCTOU) and connects to
+    that pinned, already-validated IP directly - rather than validating
+    `host` and then calling `super().connect(address)` with the original
+    hostname, which would make the base `socket.connect()` perform its own,
+    completely independent second resolution of the same hostname. The raw
+    WHOIS protocol has no Host-header/SNI concept to preserve (unlike the
+    `aiohttp`/TLS call sites elsewhere in this module), so pinning here is
+    just "connect to the validated IP instead of the hostname" with no
+    further hostname-preservation concern.
+    """
 
     def connect(self, address):
         host = address[0] if isinstance(address, tuple) else address
-        assert_host_is_safe_sync(host)
-        return super().connect(address)
+        port = address[1] if isinstance(address, tuple) else None
+        pinned_ip = resolve_safe_sync(host)[0][1]
+        return super().connect((pinned_ip, port) if port is not None else pinned_ip)
 
 
 class _SafeNICClient(NICClient):
@@ -851,7 +913,11 @@ async def ip_lookup(request: IPLookupRequest, api_key: dict = Depends(verify_api
     try:
         # `assert_host_is_safe` resolves via `getaddrinfo()`, which resolves
         # an IP literal to itself - the same private/loopback/reserved
-        # check as a DNS-mediated SSRF attempt applies directly here.
+        # check as a DNS-mediated SSRF attempt applies directly here. Not
+        # subject to the DNS-rebinding TOCTOU (`api.pdfconverterai.com#53`)
+        # either: `IPWhois(raw_ip).lookup_rdap()` below never connects to
+        # `raw_ip` itself, only to RIR/RDAP servers *about* it - same
+        # reasoning as `dns_lookup()`'s equivalent note above.
         await assert_host_is_safe(raw_ip)
     except UnsafeHostError:
         logger.warning("🚫 Blocked SSRF attempt for IP lookup: %s", raw_ip)
@@ -956,7 +1022,7 @@ async def speed_test(request: SpeedTestRequest, api_key: dict = Depends(verify_a
 
     try:
         async with aiohttp.ClientSession(
-            trace_configs=[trace_config], timeout=_SPEED_TEST_TIMEOUT
+            trace_configs=[trace_config], timeout=_SPEED_TEST_TIMEOUT, connector=_safe_connector()
         ) as session:
             current_url = url
             for _hop in range(_MAX_REDIRECT_HOPS + 1):

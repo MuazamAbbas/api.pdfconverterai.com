@@ -40,6 +40,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from app.shared.network_security import UnsafeHostError, assert_host_is_safe
+from app.shared.web.pinned_resolver import SafeResolver
 from app.shared.web.redirect_fetch import (
     _MAX_REDIRECT_HOPS,
     _REDIRECT_STATUSES,
@@ -82,6 +83,19 @@ _MAIN_PAGE_TIMEOUT = aiohttp.ClientTimeout(total=10)
 _MAX_HTML_BYTES = 2_000_000
 
 _LINK_CHECK_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+
+def _safe_connector() -> aiohttp.TCPConnector:
+    """`TCPConnector` wired to `SafeResolver` (Handbook Part C.10 /
+    `api.pdfconverterai.com#53`) - every `aiohttp.ClientSession` this module
+    constructs is built with one of these, so the connector's own real DNS
+    resolution (not just this module's own `assert_host_is_safe()`
+    pre-checks) is also validated, atomically, at the moment of connecting -
+    closing the DNS-rebinding TOCTOU window between a separate check and a
+    separate, later connect. Mirrors `app/routers/web_tools.py`'s
+    `_safe_connector()`.
+    """
+    return aiohttp.TCPConnector(resolver=SafeResolver())
 
 
 def _finding(check: str, passed: bool, message: str, suggestion: str | None) -> dict:
@@ -157,7 +171,7 @@ async def _fetch_main_page(url: str) -> dict:
 
     try:
         async with aiohttp.ClientSession(
-            trace_configs=[trace_config], timeout=_MAIN_PAGE_TIMEOUT
+            trace_configs=[trace_config], timeout=_MAIN_PAGE_TIMEOUT, connector=_safe_connector()
         ) as session:
             for _hop in range(_MAX_REDIRECT_HOPS + 1):
                 timings.clear()
@@ -577,7 +591,7 @@ async def run_seo_audit(raw_url: str) -> dict:
 
     page = await _fetch_main_page(url)
 
-    async with aiohttp.ClientSession(timeout=_LINK_CHECK_TIMEOUT) as session:
+    async with aiohttp.ClientSession(timeout=_LINK_CHECK_TIMEOUT, connector=_safe_connector()) as session:
         sitemap_result = await _check_sitemap(session, origin)
 
         if page["reachable"]:
