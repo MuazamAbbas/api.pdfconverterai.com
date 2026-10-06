@@ -26,6 +26,7 @@ yt_dlp unless a `downloaders_youtube` job actually runs - see
 """
 import logging
 import os
+import urllib.parse
 
 from app.core.config import settings
 from app.core.storage import STORAGE_PATH
@@ -35,6 +36,7 @@ from app.services.jobs.processor import (
     TransientProcessingError,
 )
 from app.services.web_tools.processors import _read_url_input
+from app.shared.network_security import UnsafeHostError, assert_host_is_safe
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,27 @@ class DownloadersYoutubeProcessor(Processor):
         url = _read_url_input(file_doc)
         if not url.startswith(("http://", "https://")):
             raise PermanentProcessingError("URL must start with http:// or https://")
+
+        # `api.pdfconverterai.com#52`: re-validated here too (not just at
+        # upload time in `app/routers/downloaders.py::upload_downloaders`),
+        # matching every other Tier 2 processor's own `validate()` step
+        # (Handbook Part C.4) never trusting that upload-time validation is
+        # the only gate a `files` document could have reached it through.
+        # Pre-download check only - this is NOT a DNS-rebinding-proof pin
+        # (`api.pdfconverterai.com#53`) of yt_dlp's own download connections
+        # themselves: yt_dlp manages its own networking entirely internally
+        # (redirects, CDN edge hosts chosen by YouTube at extraction time),
+        # which would need deep changes to yt_dlp's own transport to pin -
+        # out of scope for the narrower "zero protection today" gap this
+        # closes (see the approved feature-spec's acceptance criterion 1).
+        hostname = urllib.parse.urlparse(url).hostname
+        try:
+            if hostname:
+                await assert_host_is_safe(hostname)
+        except UnsafeHostError:
+            raise PermanentProcessingError(
+                "Cannot download from internal or reserved network addresses"
+            )
 
     async def prepare(self, job, file_doc):
         # Write flat into the shared `STORAGE_PATH`, same as every other

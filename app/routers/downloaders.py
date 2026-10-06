@@ -1,4 +1,5 @@
 import logging
+import urllib.parse
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, Request
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 from app.core.security import verify_api_key
 from app.services.files.service import UploadValidationError, get_file_by_id, save_text_input
 from app.services.jobs.service import create_job, mark_failed, mark_queued
+from app.shared.network_security import UnsafeHostError, assert_host_is_safe
 from app.shared.responses import api_error, envelope
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,24 @@ async def upload_downloaders(payload: URLUploadRequest, api_key: dict = Depends(
     if not payload.url.startswith(("http://", "https://")):
         logger.warning("URL upload rejected, missing http(s):// prefix: %s", payload.url)
         raise api_error(400, "URL must start with http:// or https://", "URL_INVALID")
+
+    # `api.pdfconverterai.com#52`: this was previously the only
+    # URL-accepting flow in the backend with zero SSRF protection - the
+    # `startswith` check above only validates the scheme, never the host.
+    # Guarded here (upload time) rather than only in the job processor, so
+    # a request never even gets a `files` record created for an
+    # internal/reserved target. Mirrors `app/routers/web_tools.py`'s
+    # `upload_web_tools`/`validate_url` pattern (same `assert_host_is_safe`
+    # helper, same `UnsafeHostError` -> 400 `URL_INVALID` mapping style).
+    hostname = urllib.parse.urlparse(payload.url).hostname
+    try:
+        if hostname:
+            await assert_host_is_safe(hostname)
+    except UnsafeHostError:
+        logger.warning("🚫 Blocked SSRF attempt for YouTube download URL: %s", hostname)
+        raise api_error(
+            400, "Cannot download from internal or reserved network addresses", "URL_INVALID"
+        )
 
     try:
         owner_id = ObjectId(api_key["key_data"]["_id"])
