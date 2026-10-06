@@ -43,9 +43,16 @@ which deliberately reaches deeper - into `web_tools_router._SafeWhoisSocket`
 specifically (this fix's own new socket subclass, not a shared/global one -
 see that test's own docstring for why patching the *global* `socket.socket`
 class instead broke the test run entirely) - to exercise the real WHOIS
-referral/recursion flow and the real `assert_host_is_safe_sync()` guard
-end-to-end.
+referral/recursion flow and the real `resolve_safe_sync()` guard
+end-to-end. `test_safe_whois_socket_connect_family_filters_to_ipv4` below is
+a separate, plain-sync unit test (no `asyncio.to_thread()`/event loop
+involved at all) that exercises the real, completely unmocked `_SafeWhoisSocket.
+connect()` method itself - including the `AF_INET` family-filtering fix -
+safe to patch the global `socket.socket.connect`/`socket.getaddrinfo` in
+*that* test specifically because nothing async is running to have a
+self-pipe wakeup broken.
 """
+import socket
 import time
 from unittest.mock import AsyncMock
 
@@ -55,7 +62,7 @@ import whois
 from ipwhois.exceptions import HTTPLookupError, IPDefinedError
 
 import app.routers.web_tools as web_tools_router
-from app.shared.network_security import assert_host_is_safe_sync
+from app.shared.network_security import resolve_safe_sync
 from tests.test_web_tools_uptime_dns_ssl import _build_web_tools_only_app
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -322,7 +329,7 @@ async def test_whois_lookup_referral_to_unsafe_host_is_blocked(
     to simulate two hops without any actual network I/O, while the real
     `NICClient` recursion (`findwhois_server()`'s regex-extraction of the
     referral host, the recursive `self.whois()` call) and the real
-    `assert_host_is_safe_sync()` guard both run unmocked for both hops.
+    `resolve_safe_sync()` guard both run unmocked for both hops.
 
     Scoped to `web_tools_router._SafeWhoisSocket` specifically - NOT the
     base `socket.socket` class - deliberately: an earlier version of this
@@ -337,11 +344,14 @@ async def test_whois_lookup_referral_to_unsafe_host_is_blocked(
     `await` never resolves. `_SafeWhoisSocket` is a distinct subclass used
     only by this WHOIS code path, so patching it directly reaches none of
     that shared machinery. `connect()` itself is faked here (rather than
-    left to actually call the real `assert_host_is_safe_sync()` +
+    left to actually call the real `resolve_safe_sync()` +
     `super().connect()` and only faking the transport underneath) for the
-    same reason - it still calls the real, unmocked `assert_host_is_safe_sync()`
+    same reason - it still calls the real, unmocked `resolve_safe_sync()`
     guard function itself, just without going through `super().connect()`
-    into the shared base-socket layer at all.
+    into the shared base-socket layer at all. The real `connect()` method's
+    own logic (including the `AF_INET` family filter) is exercised for real,
+    unfaked, by `test_safe_whois_socket_connect_family_filters_to_ipv4`
+    below instead.
     """
     first_hop_host = "8.8.8.8"  # a real, public, safe IP literal.
     referral_host = "127.0.0.1"
@@ -354,7 +364,12 @@ async def test_whois_lookup_referral_to_unsafe_host_is_blocked(
     def _fake_connect(self, address):
         host = address[0] if isinstance(address, tuple) else address
         # The real guard, unmocked - this is what's actually being tested.
-        assert_host_is_safe_sync(host)
+        # `resolve_safe_sync()` is what the real `_SafeWhoisSocket.connect()`
+        # calls today (not the removed `assert_host_is_safe_sync()`) - same
+        # "raises for an unsafe host" contract, just also returning the
+        # pinned address on success (unused here, since this fake doesn't
+        # go through the real `super().connect()` either - see docstring).
+        resolve_safe_sync(host)
         connected_hosts.append(host)
         self._fake_connected_host = host
         return None
@@ -390,9 +405,62 @@ async def test_whois_lookup_referral_to_unsafe_host_is_blocked(
     data = body["data"]
     assert data["error"] == "Cannot check internal or reserved network addresses"
     # The real fix: the referral host was never actually connected to -
-    # `assert_host_is_safe_sync()` raised for it before it was ever
-    # appended to `connected_hosts`.
+    # `resolve_safe_sync()` raised for it before it was ever appended to
+    # `connected_hosts`.
     assert connected_hosts == [first_hop_host]
+
+
+async def test_safe_whois_socket_connect_family_filters_to_ipv4(monkeypatch):
+    """Regression test for the code-reviewer's family-mismatch finding:
+    `_SafeNICClient.get_socket()` (below, in `web_tools.py`) hardcodes
+    `socket.AF_INET`, so `_SafeWhoisSocket.connect()` must filter
+    `resolve_safe_sync()`'s resolved addresses down to that family rather
+    than blindly taking the first one. A dual-stack referral host whose
+    first `getaddrinfo()` record happens to be `AF_INET6` would otherwise
+    have this connect an IPv6 literal on an `AF_INET` socket, raising
+    `socket.gaierror` - and since `whois`'s `NICClient` swallows socket
+    errors by default (`ignore_socket_errors=True`), that silently degraded
+    to a false "No WHOIS data found" instead of erroring loudly (reproduced
+    live by the reviewer before this fix).
+
+    Pure sync test - no `asyncio.to_thread()`/running event loop involved
+    at all (unlike `test_whois_lookup_referral_to_unsafe_host_is_blocked`
+    above, which explicitly avoids a global `socket.socket` patch for that
+    reason - see its own docstring) - so it's safe to patch
+    `socket.socket.connect`/`socket.getaddrinfo` globally here: nothing
+    async is running for a self-pipe wakeup to break. This lets the real,
+    completely unfaked `_SafeWhoisSocket.connect()` run end to end,
+    including the family filter itself.
+    """
+    ipv6_addr = "2606:2800:220:1:248:1893:25c8:1946"  # a real, public IPv6 address.
+    ipv4_addr = "93.184.216.34"  # a real, public IPv4 address.
+
+    def _fake_getaddrinfo(host, port=None, *args, **kwargs):
+        # AF_INET6 record listed first - the exact ordering that exposed
+        # the bug (blindly taking resolve_safe_sync()'s first result).
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", (ipv6_addr, 0, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ipv4_addr, 0)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+
+    connected_addresses: list[tuple] = []
+
+    def _fake_base_connect(self, address):
+        connected_addresses.append(address)
+
+    monkeypatch.setattr(socket.socket, "connect", _fake_base_connect)
+
+    sock = web_tools_router._SafeWhoisSocket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect(("dual-stack-referral.example.com", 43))
+    finally:
+        sock.close()
+
+    # Connected to the AF_INET address, never the AF_INET6 one that came
+    # first in the (mocked) getaddrinfo() result.
+    assert connected_addresses == [(ipv4_addr, 43)]
 
 
 # ===========================================================================
