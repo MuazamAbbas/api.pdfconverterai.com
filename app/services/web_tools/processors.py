@@ -54,13 +54,29 @@ class WebToolsSummarizeProcessor(Processor):
         return {"url": _read_url_input(file_doc)}
 
     async def execute(self, job, file_doc, prepared, ctx=None):
-        from app.services.web_tools.summarize import fetch_webpage_text, summarize_webpage_text
+        from app.services.web_tools.summarize import (
+            WebpageFetchBlockedError,
+            fetch_webpage_text,
+            summarize_webpage_text,
+        )
 
         try:
             text = await fetch_webpage_text(prepared["url"])
         except aiohttp.ClientError as e:
             # Network hiccup fetching the page - safe to retry.
             raise TransientProcessingError("Temporary error fetching the webpage") from e
+        except WebpageFetchBlockedError as e:
+            # SSRF guard blocked the target (or a redirect hop) - a distinct,
+            # permanent, generic client-facing message (Handbook Part C.10,
+            # closing #98) rather than falling into the generic ValueError
+            # branch below and being confusingly reported as "no text
+            # extracted". `WebpageFetchBlockedError` subclasses `ValueError`,
+            # so this except clause must stay ordered before it. Deliberately
+            # a fixed, hardcoded message rather than `str(e)`, same
+            # decoupling reasoning as the `ValueError` branch below (issue
+            # #39) - even though `fetch_webpage_text` only ever raises this
+            # with one already-safe literal today.
+            raise PermanentProcessingError("This webpage could not be fetched") from e
         except ValueError as e:
             # No text extracted / text too short - a permanent input problem.
             # Deliberately a fixed, hardcoded message rather than `str(e)`:
