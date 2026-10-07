@@ -167,6 +167,30 @@ async def test_summarize_step_unexpected_error_is_wrapped_as_transient(tmp_path,
         )
 
 
+async def test_fetch_blocked_by_ssrf_guard_is_permanent_and_distinct_from_no_text(tmp_path, monkeypatch):
+    """SSRF hardening (closes #98): a blocked fetch must be reported with a
+    distinct, generic message - never folded into the "no text extracted"
+    ValueError branch (which would be a confusing error for what's actually
+    a blocked internal/private target), and never retried (it's a
+    permanent input problem, not a network hiccup)."""
+    from app.services.web_tools.summarize import WebpageFetchBlockedError
+
+    file_doc = _fake_url_file_doc(tmp_path, "url.txt")
+
+    async def _fake_fetch(url):
+        raise WebpageFetchBlockedError("This webpage could not be fetched")
+
+    monkeypatch.setattr("app.services.web_tools.summarize.fetch_webpage_text", _fake_fetch)
+
+    with pytest.raises(PermanentProcessingError) as exc_info:
+        await WebToolsSummarizeProcessor().run(
+            job=object(), file_doc=file_doc, ctx={"summarize_pipeline": object()}
+        )
+
+    assert str(exc_info.value) == "This webpage could not be fetched"
+    assert "no text extracted" not in str(exc_info.value).lower()
+
+
 async def test_verify_rejects_empty_summary_result_directly():
     with pytest.raises(PermanentProcessingError, match="no output"):
         await WebToolsSummarizeProcessor().verify(job=object(), file_doc=object(), result={"summary": ""})
