@@ -311,14 +311,36 @@ async def test_run_seo_audit_rejects_unparseable_url():
 # ===========================================================================
 
 class _FakeMainPageResponse:
-    def __init__(self, status: int, location: str | None = None, body: bytes = b""):
+    def __init__(
+        self,
+        status: int,
+        location: str | None = None,
+        body: bytes = b"",
+        max_read_chunk: int | None = None,
+    ):
         self.status = status
         self.headers = {"Location": location} if location else {}
         self._body = body
+        self._pos = 0
+        # None = serve up to the requested `n` per call (still EOF-correct,
+        # via the real cursor below) - a small int instead simulates a real
+        # chunked-transfer-encoded/TCP-segmented remote that hands back far
+        # fewer bytes than requested per read (`api.pdfconverterai.com#99`).
+        # Mirrors `tests/test_web_tools_summarize_ssrf.py`'s
+        # `_FakeSummarizeResponse` exactly - the original bare
+        # `return self._body` here (no cursor, always re-serving the same
+        # prefix) was itself the "single-shot fake" the #99 issue called out
+        # as having hidden the under-read bug from this file's own tests.
+        self._max_read_chunk = max_read_chunk
+        self.read_call_count = 0
         self.content = self
 
     async def read(self, n: int) -> bytes:
-        return self._body
+        self.read_call_count += 1
+        limit = n if self._max_read_chunk is None else min(n, self._max_read_chunk)
+        chunk = self._body[self._pos : self._pos + limit]
+        self._pos += len(chunk)
+        return chunk
 
     async def __aenter__(self):
         return self
@@ -393,6 +415,51 @@ async def test_fetch_main_page_non_2xx_status_still_reachable_with_error_noted(m
     assert result["status_code"] == 404
     assert result["error"] == "Page returned status 404"
     assert result["html"] is not None
+
+
+async def test_fetch_main_page_assembles_full_body_from_many_small_chunks_under_cap(monkeypatch):
+    """`response.content.read(n)` on a real connection can return far fewer
+    than `n` bytes per call (not "n bytes or EOF") - this forces exactly
+    that with `max_read_chunk=7`, so the body can only be assembled
+    correctly if `_fetch_main_page` loops rather than trusting a single
+    `read()` call to return everything up to the cap (`#99`)."""
+    body = (
+        b"<html><body><p>Multi-chunk paragraph text, long enough to clear "
+        b"any minimum, served seven bytes at a time for this test.</p>"
+        b"</body></html>"
+    )
+    response = _FakeMainPageResponse(200, body=body, max_read_chunk=7)
+    session = _FakeMainPageSession({"https://example.com/": response})
+    _patch_main_page_session(monkeypatch, session)
+
+    result = await seo_audit._fetch_main_page("https://example.com/")
+
+    assert result["html"] == body.decode("utf-8")
+    assert result["content_size_bytes"] == len(body)
+    # Proves multiple reads actually happened - a broken single-read
+    # implementation would have returned only the first 7 bytes.
+    assert response.read_call_count > len(body) // 7
+
+
+async def test_fetch_main_page_stops_reading_once_over_cap_without_draining_whole_stream(monkeypatch):
+    """An over-cap body must be cut at `_MAX_HTML_BYTES` without the loop
+    draining the rest of the (potentially huge/malicious) remote stream -
+    proven here by a stream twice the cap size, served in small chunks, and
+    asserting far fewer reads happened than a full drain would require."""
+    chunk_size = 1_000
+    oversized_body = b"a" * (seo_audit._MAX_HTML_BYTES * 2)
+    response = _FakeMainPageResponse(200, body=oversized_body, max_read_chunk=chunk_size)
+    session = _FakeMainPageSession({"https://example.com/": response})
+    _patch_main_page_session(monkeypatch, session)
+
+    result = await seo_audit._fetch_main_page("https://example.com/")
+
+    assert result["content_size_bytes"] == seo_audit._MAX_HTML_BYTES
+    full_drain_call_count = len(oversized_body) // chunk_size
+    assert response.read_call_count < full_drain_call_count, (
+        "must stop shortly after crossing the cap, not read the entire "
+        "oversized stream"
+    )
 
 
 async def test_fetch_main_page_connector_error_degrades_cleanly(monkeypatch):
