@@ -6,6 +6,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from app.shared.network_security import UnsafeHostError, assert_host_is_safe
+from app.shared.web.body_read import read_capped_body
 from app.shared.web.pinned_resolver import SafeResolver
 from app.shared.web.redirect_fetch import (
     _MAX_REDIRECT_HOPS,
@@ -21,18 +22,12 @@ logger = logging.getLogger(__name__)
 # vector for a caller-supplied URL. Matches `app/services/seo/seo_audit.py::
 # _MAX_HTML_BYTES` (same reasoning: plenty for text extraction, caps an
 # unexpectedly huge remote response).
+#
+# The actual chunked, EOF-correct read loop lives in
+# `app.shared.web.body_read.read_capped_body()` - `_read_body_capped()`
+# below just decodes its result - since `app/services/seo/seo_audit.py`
+# needed the identical fix (`api.pdfconverterai.com#99`).
 _MAX_BODY_BYTES = 2_000_000
-
-# `StreamReader.read(n)` is NOT "read n bytes or EOF" - it returns as soon as
-# *any* data is in the buffer, which can be far fewer than `n` bytes for a
-# chunked-transfer-encoded or TCP-segmented response (i.e. almost every real
-# webpage). A single `read(_MAX_BODY_BYTES + 1)` call therefore often
-# returned only the first chunk, silently under-reading real pages instead
-# of reading up to the cap. `_read_body_capped()` below loops fixed-size
-# `_READ_CHUNK_SIZE` reads until EOF (`b""`) or until the accumulated total
-# exceeds `_MAX_BODY_BYTES`, at which point it stops immediately rather than
-# draining the rest of an oversized stream.
-_READ_CHUNK_SIZE = 65_536
 
 # Single shared deadline (Handbook Part C.10) for the *entire* fetch - every
 # redirect hop plus the final body read - not a per-hop budget that could
@@ -82,25 +77,13 @@ def _safe_connector() -> aiohttp.TCPConnector:
 
 
 async def _read_body_capped(response: aiohttp.ClientResponse) -> str:
-    """Reads `response`'s body in fixed `_READ_CHUNK_SIZE` chunks until EOF
-    or until the accumulated total exceeds `_MAX_BODY_BYTES`, whichever
-    comes first - see `_READ_CHUNK_SIZE`'s module-level docstring for why a
-    single bare `.read(_MAX_BODY_BYTES + 1)` call is not sufficient. Stops
-    reading immediately once over cap rather than draining the rest of an
-    oversized remote stream."""
-    chunks: list[bytes] = []
-    total = 0
-    while total <= _MAX_BODY_BYTES:
-        chunk = await response.content.read(_READ_CHUNK_SIZE)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-
-    body = b"".join(chunks)
-    if total > _MAX_BODY_BYTES:
+    """Thin wrapper around `read_capped_body()` - decodes the capped body
+    and logs the truncation case, matching this module's existing
+    conventions."""
+    body, truncated = await read_capped_body(response, _MAX_BODY_BYTES)
+    if truncated:
         logger.debug("Summarize fetch: response body truncated at %d bytes", _MAX_BODY_BYTES)
-    return body[:_MAX_BODY_BYTES].decode("utf-8", errors="replace")
+    return body.decode("utf-8", errors="replace")
 
 
 async def _fetch_safe(session: aiohttp.ClientSession, url: str) -> str:

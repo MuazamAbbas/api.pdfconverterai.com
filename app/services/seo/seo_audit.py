@@ -40,6 +40,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from app.shared.network_security import UnsafeHostError, assert_host_is_safe
+from app.shared.web.body_read import read_capped_body
 from app.shared.web.pinned_resolver import SafeResolver
 from app.shared.web.redirect_fetch import (
     _MAX_REDIRECT_HOPS,
@@ -193,9 +194,15 @@ async def _fetch_main_page(url: str) -> dict:
                         current_url = next_url
                         continue
 
-                    raw_body = await response.content.read(_MAX_HTML_BYTES + 1)
-                    truncated = len(raw_body) > _MAX_HTML_BYTES
-                    body = raw_body[:_MAX_HTML_BYTES]
+                    # `read_capped_body()` loops fixed-size chunked reads
+                    # until EOF or the cap is exceeded - a single bare
+                    # `.content.read(_MAX_HTML_BYTES + 1)` call previously
+                    # here under-read every real chunked/segmented response
+                    # instead of reading up to the cap
+                    # (`api.pdfconverterai.com#99`). Shared with
+                    # `app/services/web_tools/summarize.py`, which fixed the
+                    # identical bug first (`#98`).
+                    body, truncated = await read_capped_body(response, _MAX_HTML_BYTES)
                     total_ms = round((time.monotonic() - total_start) * 1000, 2)
                     html_text = body.decode("utf-8", errors="replace")
                     error = None
