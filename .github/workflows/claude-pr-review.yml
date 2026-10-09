@@ -1,0 +1,111 @@
+name: Claude PR Security Review
+
+# Advisory only, by design (ADR-026) - this check is NOT required and cannot
+# block a merge. Runs alongside, not instead of, the existing
+# security-reviewer/code-reviewer subagent pass.
+#
+# Trigger is `pull_request` ONLY, never `pull_request_target` - a fork PR's
+# title/body/diff/comments are untrusted content, and `pull_request_target`
+# would run this with base-repo secrets against attacker-controlled input.
+# `pull_request` runs with the PR's own (minimal, read-only-plus-comment)
+# permissions and no access to repo secrets beyond what this workflow itself
+# grants, so a malicious PR can at most get a bad review comment posted, not
+# exfiltrate anything.
+#
+# `paths:` restricts triggering to actual code changes - this review runs
+# against the founder's Claude Pro subscription quota (see below), shared
+# with his own interactive Claude Code sessions, not separate API billing,
+# so a docs-only or fixture-only PR shouldn't spend any of it.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "scripts/**"
+      - "requirements.txt"
+      - "requirements-freeze.txt"
+      - "pyproject.toml"
+      - ".github/workflows/**"
+
+# Minimal permissions (ADR-026): contents:read + pull-requests:write is the
+# comment-only surface this job needs. id-token:write is required for the
+# action's default GitHub-App authentication path (confirmed directly in
+# Anthropic's own docs - code.claude.com/docs/en/github-actions - not just
+# copied from an example), including when authenticating with an OAuth
+# token rather than a static API key. Deliberately omits security-events:write
+# (SARIF upload) - unused here, nothing in this job uploads a code-scanning
+# result.
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Skip draft PRs - no point spending subscription quota on a PR the
+    # author isn't ready for feedback on yet.
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      # Pinned to a full commit SHA (not a tag) per ADR-026 - verified
+      # directly against the real anthropics/claude-code-action repo
+      # (`git ls-remote`, and tag v1.0.247 dereferences to this exact
+      # commit) rather than trusted from any single source.
+      #
+      # Credential: CLAUDE_CODE_OAUTH_TOKEN (the founder's Claude Pro
+      # subscription, generated via `claude setup-token` locally), NOT
+      # ANTHROPIC_API_KEY - confirmed via `gh secret list` that no
+      # Anthropic credential existed in this repo before the founder added
+      # this one; the only pre-existing secrets anywhere were the
+      # deploy-only VPS_SSH_HOST/VPS_SSH_PRIVATE_KEY pair, correctly left
+      # untouched. Using an OAuth token here means these review runs use
+      # the founder's subscription usage limits (shared with his own
+      # interactive Claude Code sessions) instead of separate per-token API
+      # billing - see ADR-026's cost/trade-off section. Never echo this
+      # token's value in any step - it is referenced only via the action's
+      # own `claude_code_oauth_token` input below.
+      - uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            This is api.pdfconverterai.com, a FastAPI backend (Handbook Part C - see
+            CLAUDE.md for module boundaries, SSRF/network-security conventions, and
+            the "no leftover branding / no exposed secrets" acceptance criteria).
+
+            Perform a security-focused review of this pull request:
+
+            ## OWASP Top 10 / backend-specific checks
+            - SQL/NoSQL injection, command injection, SSRF (this codebase has had
+              real SSRF findings before - check any caller-supplied-URL fetch for
+              `assert_host_is_safe`/pinned-resolver usage, matching existing
+              patterns in app/shared/web/)
+            - Broken authentication/authorization, missing `require_admin`/API-key
+              checks on new routes
+            - Hardcoded secrets or credentials, logging that could leak secrets or
+              PII
+            - Unsafe deserialization, unbounded reads from an external response
+              (this codebase has had real "under-read despite a cap" and
+              "no cap at all" bugs before)
+            - Race conditions / TOCTOU issues
+
+            Rate severity as CRITICAL, HIGH, MEDIUM, LOW, or NONE for each finding.
+
+            Use `gh pr comment` for a top-level summary.
+            Use `mcp__github_inline_comment__create_inline_comment` (with
+            `confirmed: true`) to highlight specific lines.
+            Only post GitHub comments - don't submit review text as chat messages.
+            This review is advisory only and does not replace the repo's own
+            security-reviewer/code-reviewer subagent pass - say so in the summary
+            comment.
+
+          claude_args: |
+            --max-turns 10
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
