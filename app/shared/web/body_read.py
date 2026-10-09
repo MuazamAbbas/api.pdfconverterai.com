@@ -1,4 +1,4 @@
-"""Shared capped, chunked body-read helper (Handbook Part C.10).
+"""Shared capped, chunked body-read helper.
 
 `aiohttp.StreamReader.read(n)` is NOT "read n bytes or EOF" - it returns as
 soon as *any* data is in the buffer, which can be far fewer than `n` bytes
