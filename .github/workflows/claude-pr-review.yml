@@ -18,7 +18,14 @@ name: Claude PR Security Review
 # so a docs-only or fixture-only PR shouldn't spend any of it.
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # `ready_for_review` is required here, not optional - a PR opened as a
+    # draft (the job below skips drafts) and later marked ready never fires
+    # `opened` or `synchronize` again, so without this event it would never
+    # get reviewed at all. Found during the 2026-10-09 throwaway-PR
+    # verification: `gh pr create` without `--draft` can still land as a
+    # draft depending on repo/CLI defaults, and marking it ready produced no
+    # new run until this event type was added.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "app/**"
       - "tests/**"
