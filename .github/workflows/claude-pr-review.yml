@@ -35,18 +35,21 @@ on:
       - "pyproject.toml"
       - ".github/workflows/**"
 
-# Minimal permissions (ADR-026): contents:read + pull-requests:write is the
-# comment-only surface this job needs. id-token:write is required for the
-# action's default GitHub-App authentication path (confirmed directly in
-# Anthropic's own docs - code.claude.com/docs/en/github-actions - not just
-# copied from an example), including when authenticating with an OAuth
-# token rather than a static API key. Deliberately omits security-events:write
-# (SARIF upload) - unused here, nothing in this job uploads a code-scanning
-# result.
+# Minimal permissions (ADR-026 Amendment 1): contents:read + pull-requests:write
+# is the comment-only surface this job needs. id-token:write is DROPPED here -
+# the action's own FAQ confirms the GitHub-OIDC-to-App-token exchange (the
+# thing id-token:write exists for) only runs when no `github_token` input is
+# supplied; passing `github_token` below (the default workflow token, scoped
+# to exactly this permissions: block) makes that exchange unnecessary and
+# avoids depending on the Claude GitHub App being installed at all. This is
+# an experiment at commit time - the throwaway-PR verification after this
+# merges is the actual proof. If a run ever fails demanding an OIDC token,
+# restore id-token:write in a follow-up fix rather than assuming this holds.
+# Deliberately omits security-events:write (SARIF upload) - unused, nothing
+# in this job uploads a code-scanning result.
 permissions:
   contents: read
   pull-requests: write
-  id-token: write
 
 jobs:
   review:
@@ -64,8 +67,8 @@ jobs:
       # (`git ls-remote`, and tag v1.0.247 dereferences to this exact
       # commit) rather than trusted from any single source.
       #
-      # Credential: CLAUDE_CODE_OAUTH_TOKEN (the founder's Claude Pro
-      # subscription, generated via `claude setup-token` locally), NOT
+      # Anthropic credential: CLAUDE_CODE_OAUTH_TOKEN (the founder's Claude
+      # Pro subscription, generated via `claude setup-token` locally), NOT
       # ANTHROPIC_API_KEY - confirmed via `gh secret list` that no
       # Anthropic credential existed in this repo before the founder added
       # this one; the only pre-existing secrets anywhere were the
@@ -76,9 +79,18 @@ jobs:
       # billing - see ADR-026's cost/trade-off section. Never echo this
       # token's value in any step - it is referenced only via the action's
       # own `claude_code_oauth_token` input below.
+      #
+      # GitHub credential: the default workflow GITHUB_TOKEN (ADR-026
+      # Amendment 1), NOT the Claude GitHub App. Verified in the action's own
+      # FAQ: "if you wish to not use the GitHub app, you can instead provide
+      # a github_token input to the action for Claude to operate with."
+      # Trade-off, accepted: comments post as the generic Actions bot
+      # identity rather than claude[bot], and the sticky-comment feature
+      # (one updating comment per PR) doesn't work without claude[bot] auth.
       - uses: anthropics/claude-code-action@2dca132ff0e0c4094ce6048b422c6915a071210b
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
