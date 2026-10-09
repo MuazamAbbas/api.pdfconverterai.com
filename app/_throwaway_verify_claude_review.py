@@ -15,3 +15,4 @@ async def fetch_whatever_url_the_caller_gives(url: str) -> str:
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             return await response.text()
+
