@@ -39,6 +39,7 @@ from app.shared.network_security import (
     resolve_safe_sync,
 )
 from app.shared.responses import api_error, envelope
+from app.shared.web.body_read import read_capped_body
 from app.shared.web.pinned_resolver import SafeResolver
 from app.shared.web.redirect_fetch import (
     _MAX_REDIRECT_HOPS,
@@ -1005,6 +1006,14 @@ async def ip_lookup(request: IPLookupRequest, api_key: dict = Depends(verify_api
 _SPEED_TEST_TIMEOUT = aiohttp.ClientTimeout(total=5)
 _TOO_MANY_REDIRECTS_MESSAGE = "Too many redirects"
 
+# Matches the `_MAX_HTML_BYTES`/`_MAX_BODY_BYTES` convention already used by
+# `seo_audit.py`/`summarize.py` for the same `read_capped_body()` helper
+# (api.pdfconverterai.com#98/#99). speed_test() doesn't need the body's
+# content at all beyond its size, so this bounds memory for a caller-
+# supplied URL's response regardless of how large the real remote body is
+# (api.pdfconverterai.com#101).
+_MAX_SPEED_TEST_BODY_BYTES = 2_000_000
+
 
 def _empty_speed_test_result(url: str, error: str) -> dict:
     return envelope(True, "Speed test completed", data={
@@ -1015,6 +1024,7 @@ def _empty_speed_test_result(url: str, error: str) -> dict:
         "total_time_ms": None,
         "status_code": None,
         "content_size_bytes": None,
+        "content_truncated": False,
         "error": error,
     })
 
@@ -1068,8 +1078,46 @@ async def speed_test(request: SpeedTestRequest, api_key: dict = Depends(verify_a
                         current_url = next_url
                         continue
 
-                    body = await response.read()
+                    body, truncated = await read_capped_body(response, _MAX_SPEED_TEST_BODY_BYTES)
                     total_ms = round((time.monotonic() - total_start) * 1000, 2)
+                    if truncated:
+                        logger.debug(
+                            "Speed test: response body truncated at %d bytes for %s",
+                            _MAX_SPEED_TEST_BODY_BYTES, _redact_url_credentials(current_url),
+                        )
+                    # `content_size_bytes` is exact when untruncated. When
+                    # truncated, prefer the declared Content-Length *only*
+                    # when the response has no Content-Encoding - aiohttp
+                    # auto-decompresses the body we read, so a compressed
+                    # Content-Length and the decompressed bytes we counted
+                    # are different units and must never be mixed. Also
+                    # sanity-checked against the capped byte count actually
+                    # observed: the target is a caller-supplied, untrusted
+                    # remote host, and HTTP doesn't guarantee a server's
+                    # declared Content-Length matches what it actually
+                    # sends - a malicious target could otherwise claim a
+                    # tiny Content-Length while streaming far more, and have
+                    # that spoofed value reported as fact - this is
+                    # detectable because we have hard proof (bytes actually
+                    # observed exceed the claim). An *overstated*
+                    # Content-Length is not symmetrically detectable: there
+                    # is no way to disprove a too-large claim without
+                    # draining the full stream, which would defeat the cap
+                    # entirely. content_size_bytes is therefore best-effort
+                    # and target-declared in that one case, same as any
+                    # other header a remote server controls. With no usable
+                    # (or provably-false) Content-Length, content_size_bytes
+                    # reports "at least this many bytes" (the capped count),
+                    # not the real total.
+                    if (
+                        truncated
+                        and "Content-Encoding" not in response.headers
+                        and response.content_length is not None
+                        and response.content_length >= len(body)
+                    ):
+                        content_size_bytes = response.content_length
+                    else:
+                        content_size_bytes = len(body)
                     logger.info("Speed test completed for %s: status=%d", hostname, response.status)
                     return envelope(True, "Speed test completed", data={
                         "url": raw_url,
@@ -1078,7 +1126,8 @@ async def speed_test(request: SpeedTestRequest, api_key: dict = Depends(verify_a
                         "ttfb_ms": timings.get("ttfb_ms"),
                         "total_time_ms": total_ms,
                         "status_code": response.status,
-                        "content_size_bytes": len(body),
+                        "content_size_bytes": content_size_bytes,
+                        "content_truncated": truncated,
                         "error": None,
                     })
 

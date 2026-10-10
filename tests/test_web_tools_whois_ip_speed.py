@@ -751,18 +751,64 @@ async def test_ip_lookup_blocks_ssrf_targets(web_client, api_key, monkeypatch, t
 # /web_tools/speed_test
 # ===========================================================================
 
+class _FakeStreamContent:
+    """Mimics aiohttp's `StreamReader` (`response.content`) for
+    `read_capped_body()` (api.pdfconverterai.com#101): serves `body` in
+    fixed-size chunks - independent of the caller's requested `n`, matching
+    real chunked-transfer behavior - and counts every `read()` call so tests
+    can prove the stream was *not* drained past the cap."""
+
+    def __init__(self, body: bytes, deliver_chunk_size: int = 65_536):
+        self._body = body
+        self._deliver_chunk_size = deliver_chunk_size
+        self._offset = 0
+        self.read_calls = 0
+
+    async def read(self, n: int = -1) -> bytes:
+        self.read_calls += 1
+        if self._offset >= len(self._body):
+            return b""
+        chunk = self._body[self._offset:self._offset + self._deliver_chunk_size]
+        self._offset += len(chunk)
+        return chunk
+
+
 class _FakeSpeedResponse:
     """Mimics just enough of `aiohttp.ClientResponse` for `speed_test()`:
-    `.status`, `.headers.get("Location")`, async `.read()`, and
-    async-context-manager support (`async with session.get(...) as response:`).
+    `.status`, `.headers`, `.content_length`, `.content.read()` (see
+    `_FakeStreamContent` above - `read_capped_body()` reads via `.content`,
+    not the whole-body `.read()` shortcut), and async-context-manager
+    support (`async with session.get(...) as response:`).
     """
 
-    def __init__(self, status: int, location: str | None = None, body: bytes = b""):
+    def __init__(
+        self,
+        status: int,
+        location: str | None = None,
+        body: bytes = b"",
+        content_length: int | None = None,
+        content_encoding: str | None = None,
+    ):
         self.status = status
-        self.headers = {"Location": location} if location else {}
+        headers = {}
+        if location:
+            headers["Location"] = location
+        if content_encoding:
+            headers["Content-Encoding"] = content_encoding
+        self.headers = headers
         self._body = body
+        # Real aiohttp: `None` when the response has no Content-Length
+        # header at all (e.g. chunked transfer) - not inferred from body
+        # length, since the whole point here is to distinguish "declared
+        # size" from "bytes we actually counted".
+        self.content_length = content_length
+        self.content = _FakeStreamContent(body)
 
     async def read(self) -> bytes:
+        # Kept only so the pre-fix code path (`response.read()`, the whole
+        # point of api.pdfconverterai.com#101) still runs unmodified against
+        # this fake when proving the new tests fail on old code - current
+        # production code reads via `.content` above instead.
         return self._body
 
     async def __aenter__(self):
@@ -858,6 +904,7 @@ async def test_speed_test_happy_path(web_client, api_key, monkeypatch):
     assert data["url"] == "https://example.com"
     assert data["status_code"] == 200
     assert data["content_size_bytes"] == len(b"hello world")
+    assert data["content_truncated"] is False
     assert isinstance(data["total_time_ms"], (int, float))
     assert data["error"] is None
     assert session.requested_urls == ["https://example.com"]
@@ -1009,3 +1056,141 @@ async def test_speed_test_blocks_ssrf_on_redirect_hop(web_client, api_key, monke
     assert data["error"] == "Cannot check internal or reserved network addresses"
     # The unsafe redirect target was never actually followed/requested again.
     assert session.requested_urls == ["https://example.com"]
+
+
+async def test_speed_test_oversized_body_is_capped_without_draining_stream(
+    web_client, api_key, monkeypatch
+):
+    """Regression test for api.pdfconverterai.com#101: `speed_test()` used
+    to do an unbounded `response.read()` on a caller-supplied URL's body -
+    a resource-exhaustion vector. This must now cap at
+    `_MAX_SPEED_TEST_BODY_BYTES` *and* stop reading immediately rather than
+    draining the rest of a huge/malicious stream (same contract as
+    `read_capped_body()` itself - see its own docstring)."""
+    oversized_body = b"x" * (web_tools_router._MAX_SPEED_TEST_BODY_BYTES + 1_000_000)
+    fake_response = _FakeSpeedResponse(200, body=oversized_body)
+    session = _ScriptedSpeedSession({"https://example.com": fake_response})
+    _patch_speed_session(monkeypatch, session)
+
+    resp = await web_client.post(
+        "/v1/web_tools/speed_test",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["content_truncated"] is True
+    assert data["content_size_bytes"] <= web_tools_router._MAX_SPEED_TEST_BODY_BYTES
+    assert data["error"] is None
+
+    # The real point: the stream was cut off, not drained. Fully draining
+    # `oversized_body` at the stream's 65,536-byte delivery size would take
+    # far more read() calls than reaching the cap does.
+    calls_to_drain_fully = -(-len(oversized_body) // 65_536)
+    assert fake_response.content.read_calls < calls_to_drain_fully
+
+
+async def test_speed_test_truncated_response_uses_content_length_header_when_present(
+    web_client, api_key, monkeypatch
+):
+    """When truncated and the response has no Content-Encoding, the real
+    declared Content-Length is the accurate total size - prefer it over the
+    merely-capped byte count we actually buffered."""
+    declared_size = web_tools_router._MAX_SPEED_TEST_BODY_BYTES + 5_000_000
+    oversized_body = b"x" * (web_tools_router._MAX_SPEED_TEST_BODY_BYTES + 1_000_000)
+    fake_response = _FakeSpeedResponse(200, body=oversized_body, content_length=declared_size)
+    session = _ScriptedSpeedSession({"https://example.com": fake_response})
+    _patch_speed_session(monkeypatch, session)
+
+    resp = await web_client.post(
+        "/v1/web_tools/speed_test",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["content_truncated"] is True
+    assert data["content_size_bytes"] == declared_size
+
+
+async def test_speed_test_truncated_gzip_response_uses_capped_count_not_content_length(
+    web_client, api_key, monkeypatch
+):
+    """Regression test for the Content-Encoding unit mismatch: aiohttp
+    auto-decompresses the body before `read_capped_body()` ever sees it, so
+    a gzip response's Content-Length header (the *compressed* size) must
+    never be reported as `content_size_bytes` (the *decompressed* byte
+    count) - the two are different units. Falls back to the capped count
+    ("at least this many bytes"), not the misleading header value."""
+    compressed_content_length = 500_000  # smaller than the cap - would be
+    # wrongly picked as "the real size" if Content-Encoding weren't checked.
+    oversized_body = b"x" * (web_tools_router._MAX_SPEED_TEST_BODY_BYTES + 1_000_000)
+    fake_response = _FakeSpeedResponse(
+        200, body=oversized_body, content_length=compressed_content_length, content_encoding="gzip",
+    )
+    session = _ScriptedSpeedSession({"https://example.com": fake_response})
+    _patch_speed_session(monkeypatch, session)
+
+    resp = await web_client.post(
+        "/v1/web_tools/speed_test",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["content_truncated"] is True
+    assert data["content_size_bytes"] == web_tools_router._MAX_SPEED_TEST_BODY_BYTES
+    assert data["content_size_bytes"] != compressed_content_length
+
+
+async def test_speed_test_truncated_response_rejects_content_length_smaller_than_observed(
+    web_client, api_key, monkeypatch
+):
+    """Regression test for the security-reviewer's finding on #101: the
+    speed-test target is a caller-supplied, untrusted remote host, and HTTP
+    doesn't guarantee its declared Content-Length matches what it actually
+    sends. A malicious target claiming a tiny Content-Length while actually
+    streaming past the cap must not have that spoofed value reported as
+    `content_size_bytes` - falls back to the capped count instead, since a
+    declared size smaller than what was actually observed is provably a
+    lie, not a legitimate "page got bigger mid-response" case."""
+    spoofed_small_content_length = 10  # far smaller than what's actually sent.
+    oversized_body = b"x" * (web_tools_router._MAX_SPEED_TEST_BODY_BYTES + 1_000_000)
+    fake_response = _FakeSpeedResponse(
+        200, body=oversized_body, content_length=spoofed_small_content_length,
+    )
+    session = _ScriptedSpeedSession({"https://example.com": fake_response})
+    _patch_speed_session(monkeypatch, session)
+
+    resp = await web_client.post(
+        "/v1/web_tools/speed_test",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["content_truncated"] is True
+    assert data["content_size_bytes"] == web_tools_router._MAX_SPEED_TEST_BODY_BYTES
+    assert data["content_size_bytes"] != spoofed_small_content_length
+
+
+async def test_speed_test_truncated_response_falls_back_to_capped_count_without_content_length(
+    web_client, api_key, monkeypatch
+):
+    """Truncated, no Content-Encoding, but also no Content-Length header at
+    all (e.g. chunked transfer with an unknown total) - nothing to prefer
+    over the capped count, so it reports "at least this many bytes"."""
+    oversized_body = b"x" * (web_tools_router._MAX_SPEED_TEST_BODY_BYTES + 1_000_000)
+    fake_response = _FakeSpeedResponse(200, body=oversized_body, content_length=None)
+    session = _ScriptedSpeedSession({"https://example.com": fake_response})
+    _patch_speed_session(monkeypatch, session)
+
+    resp = await web_client.post(
+        "/v1/web_tools/speed_test",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["content_truncated"] is True
+    assert data["content_size_bytes"] == web_tools_router._MAX_SPEED_TEST_BODY_BYTES
