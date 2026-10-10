@@ -52,6 +52,7 @@ safe to patch the global `socket.socket.connect`/`socket.getaddrinfo` in
 *that* test specifically because nothing async is running to have a
 self-pipe wakeup broken.
 """
+import asyncio
 import socket
 import time
 from unittest.mock import AsyncMock
@@ -788,6 +789,7 @@ class _FakeSpeedResponse:
         body: bytes = b"",
         content_length: int | None = None,
         content_encoding: str | None = None,
+        delay: float = 0,
     ):
         self.status = status
         headers = {}
@@ -803,6 +805,11 @@ class _FakeSpeedResponse:
         # size" from "bytes we actually counted".
         self.content_length = content_length
         self.content = _FakeStreamContent(body)
+        # Simulates a slow hop (api.pdfconverterai.com#109's shared-deadline
+        # regression test) - a real `await asyncio.sleep()` so
+        # `asyncio.wait_for()`'s real cancellation/timeout machinery actually
+        # engages, not a no-op.
+        self._delay = delay
 
     async def read(self) -> bytes:
         # Kept only so the pre-fix code path (`response.read()`, the whole
@@ -812,6 +819,8 @@ class _FakeSpeedResponse:
         return self._body
 
     async def __aenter__(self):
+        if self._delay:
+            await asyncio.sleep(self._delay)
         return self
 
     async def __aexit__(self, *exc_info):
@@ -1194,3 +1203,76 @@ async def test_speed_test_truncated_response_falls_back_to_capped_count_without_
     data = resp.json()["data"]
     assert data["content_truncated"] is True
     assert data["content_size_bytes"] == web_tools_router._MAX_SPEED_TEST_BODY_BYTES
+
+
+async def test_speed_test_shared_deadline_cuts_off_slow_redirect_chain(
+    web_client, api_key, monkeypatch
+):
+    """Regression test for api.pdfconverterai.com#109: `_SPEED_TEST_TIMEOUT`
+    used to be applied at the `ClientSession` level and reused across the
+    manual redirect loop - aiohttp re-applies a session-level `ClientTimeout`
+    fresh to *each* `session.get()` call rather than as a shared budget, so
+    the real worst case was `(_MAX_REDIRECT_HOPS + 1) x deadline`, not one
+    deadline total. A short, monkeypatched deadline keeps this test fast:
+    4 scripted hops each individually well under it, but their *sum*
+    comfortably exceeds it - the fix must cut the whole chain off at one
+    shared deadline, not let each hop reset the clock."""
+    monkeypatch.setattr(web_tools_router, "_SPEED_TEST_TIMEOUT_SECONDS", 0.3)
+    per_hop_delay = 0.15  # individually well under the 0.3s deadline.
+    hop_urls = [f"https://example.com/hop{i}" for i in range(4)] + ["https://example.com/final"]
+    responses_by_url = {
+        hop_urls[i]: _FakeSpeedResponse(302, location=hop_urls[i + 1], delay=per_hop_delay)
+        for i in range(len(hop_urls) - 1)
+    }
+    responses_by_url[hop_urls[-1]] = _FakeSpeedResponse(200, body=b"ok", delay=per_hop_delay)
+    session = _ScriptedSpeedSession(responses_by_url)
+    _patch_speed_session(monkeypatch, session)
+
+    start = time.monotonic()
+    resp = await web_client.post(
+        "/v1/web_tools/speed_test",
+        json={"url": hop_urls[0]},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    elapsed = time.monotonic() - start
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    # Unchanged in shape and wording - same message a per-hop timeout
+    # produced before this fix.
+    assert data["status_code"] is None
+    assert data["error"] == web_tools_router._CONNECT_ERROR_MESSAGES["timeout"]
+
+    # The real point: cut off by the *shared* deadline, not left to run the
+    # whole (5 x 0.15s = 0.75s) chain to completion first.
+    full_chain_duration = per_hop_delay * len(hop_urls)
+    assert elapsed < full_chain_duration
+    assert len(session.requested_urls) < len(hop_urls)
+
+
+async def test_speed_test_shared_deadline_short_chain_still_succeeds(
+    web_client, api_key, monkeypatch
+):
+    """A short redirect chain that comfortably finishes within the shared
+    deadline must still return full, correct results and timings - the
+    fix must not make the common case stricter, only the pathological one."""
+    monkeypatch.setattr(web_tools_router, "_SPEED_TEST_TIMEOUT_SECONDS", 0.3)
+    session = _ScriptedSpeedSession({
+        "https://example.com": _FakeSpeedResponse(301, location="https://example.com/", delay=0.01),
+        "https://example.com/": _FakeSpeedResponse(200, body=b"hello world", delay=0.01),
+    })
+    _patch_speed_session(monkeypatch, session)
+
+    resp = await web_client.post(
+        "/v1/web_tools/speed_test",
+        json={"url": "https://example.com"},
+        headers={"X-API-Key": api_key["key"]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["status_code"] == 200
+    assert data["content_size_bytes"] == len(b"hello world")
+    assert data["content_truncated"] is False
+    assert isinstance(data["total_time_ms"], (int, float))
+    assert data["error"] is None
+    assert session.requested_urls == ["https://example.com", "https://example.com/"]

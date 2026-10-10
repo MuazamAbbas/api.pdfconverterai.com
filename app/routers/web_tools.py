@@ -1003,7 +1003,18 @@ async def ip_lookup(request: IPLookupRequest, api_key: dict = Depends(verify_api
 # Website Speed Test
 # ---------------------------------------------------------------------------
 
-_SPEED_TEST_TIMEOUT = aiohttp.ClientTimeout(total=5)
+# Single shared deadline (matches `app/services/web_tools/summarize.py`'s own
+# `_FETCH_TIMEOUT_SECONDS`) for the *entire* operation - every redirect hop
+# plus the final capped body read - not a per-hop budget that could compound
+# up to `_MAX_REDIRECT_HOPS` x this value. Replaces the prior
+# `aiohttp.ClientTimeout(total=5)` passed to the `ClientSession` itself, which
+# aiohttp re-applies fresh to *each* individual `session.get()` call rather
+# than to the whole redirect chain (api.pdfconverterai.com#109) - worst case
+# was `(_MAX_REDIRECT_HOPS + 1) x 5s` = 30s, not 5s. Kept at 5s: that was
+# always the intended budget for the whole check, not a per-hop one - a
+# speed test that legitimately needs longer than that across its full
+# redirect chain is already well outside what this tool is meant to measure.
+_SPEED_TEST_TIMEOUT_SECONDS = 5
 _TOO_MANY_REDIRECTS_MESSAGE = "Too many redirects"
 
 # Matches the `_MAX_HTML_BYTES`/`_MAX_BODY_BYTES` convention already used by
@@ -1053,92 +1064,120 @@ async def speed_test(request: SpeedTestRequest, api_key: dict = Depends(verify_a
     trace_config = _build_speed_trace_config(timings)
     total_start = time.monotonic()
 
+    async def _run_hops(session: aiohttp.ClientSession) -> dict | None:
+        """Runs the redirect-following loop and the final capped body read
+        for one `speed_test()` call. Returns the result `data` dict on a
+        non-redirect final response, or `None` if `_MAX_REDIRECT_HOPS` was
+        exceeded without one - the caller turns `None` into the "Too many
+        redirects" result, exactly as the inline loop used to.
+
+        No per-call timeout here - the *caller* wraps a single call to this
+        in one `asyncio.wait_for(_SPEED_TEST_TIMEOUT_SECONDS)` covering every
+        hop plus the body read as a shared budget (api.pdfconverterai.com#109),
+        matching `app/services/web_tools/summarize.py::_fetch_safe()`'s
+        pattern exactly. Any exception other than that outer timeout (an
+        `UnsafeHostError` from a redirect hop, a connector/client error, …)
+        propagates through `wait_for()` unchanged, straight to the caller's
+        own existing `except` handlers below - unaffected by this refactor.
+        """
+        current_url = url
+        for _hop in range(_MAX_REDIRECT_HOPS + 1):
+            timings.clear()
+            async with session.get(current_url, allow_redirects=False) as response:
+                location = response.headers.get("Location")
+                if response.status in _REDIRECT_STATUSES and location:
+                    next_url = urllib.parse.urljoin(current_url, location)
+                    next_hostname = urllib.parse.urlparse(next_url).hostname
+                    if next_hostname:
+                        # Re-validated per hop for the same reason
+                        # `check_url()` does it - a public URL that
+                        # redirects to an internal address must not
+                        # bypass the pre-request guard above.
+                        await assert_host_is_safe(next_hostname)
+                    logger.debug(
+                        "↪️ Speed test following redirect: %s -> %s",
+                        _redact_url_credentials(current_url), _redact_url_credentials(next_url),
+                    )
+                    current_url = next_url
+                    continue
+
+                body, truncated = await read_capped_body(response, _MAX_SPEED_TEST_BODY_BYTES)
+                total_ms = round((time.monotonic() - total_start) * 1000, 2)
+                if truncated:
+                    logger.debug(
+                        "Speed test: response body truncated at %d bytes for %s",
+                        _MAX_SPEED_TEST_BODY_BYTES, _redact_url_credentials(current_url),
+                    )
+                # `content_size_bytes` is exact when untruncated. When
+                # truncated, prefer the declared Content-Length *only*
+                # when the response has no Content-Encoding - aiohttp
+                # auto-decompresses the body we read, so a compressed
+                # Content-Length and the decompressed bytes we counted
+                # are different units and must never be mixed. Also
+                # sanity-checked against the capped byte count actually
+                # observed: the target is a caller-supplied, untrusted
+                # remote host, and HTTP doesn't guarantee a server's
+                # declared Content-Length matches what it actually
+                # sends - a malicious target could otherwise claim a
+                # tiny Content-Length while streaming far more, and have
+                # that spoofed value reported as fact - this is
+                # detectable because we have hard proof (bytes actually
+                # observed exceed the claim). An *overstated*
+                # Content-Length is not symmetrically detectable: there
+                # is no way to disprove a too-large claim without
+                # draining the full stream, which would defeat the cap
+                # entirely. content_size_bytes is therefore best-effort
+                # and target-declared in that one case, same as any
+                # other header a remote server controls. With no usable
+                # (or provably-false) Content-Length, content_size_bytes
+                # reports "at least this many bytes" (the capped count),
+                # not the real total.
+                if (
+                    truncated
+                    and "Content-Encoding" not in response.headers
+                    and response.content_length is not None
+                    and response.content_length >= len(body)
+                ):
+                    content_size_bytes = response.content_length
+                else:
+                    content_size_bytes = len(body)
+                logger.info("Speed test completed for %s: status=%d", hostname, response.status)
+                return {
+                    "url": raw_url,
+                    "dns_time_ms": timings.get("dns_time_ms"),
+                    "connect_time_ms": timings.get("connect_time_ms"),
+                    "ttfb_ms": timings.get("ttfb_ms"),
+                    "total_time_ms": total_ms,
+                    "status_code": response.status,
+                    "content_size_bytes": content_size_bytes,
+                    "content_truncated": truncated,
+                    "error": None,
+                }
+        return None
+
     try:
         async with aiohttp.ClientSession(
-            trace_configs=[trace_config], timeout=_SPEED_TEST_TIMEOUT, connector=_safe_connector()
+            trace_configs=[trace_config], connector=_safe_connector()
         ) as session:
-            current_url = url
-            for _hop in range(_MAX_REDIRECT_HOPS + 1):
-                timings.clear()
-                async with session.get(current_url, allow_redirects=False) as response:
-                    location = response.headers.get("Location")
-                    if response.status in _REDIRECT_STATUSES and location:
-                        next_url = urllib.parse.urljoin(current_url, location)
-                        next_hostname = urllib.parse.urlparse(next_url).hostname
-                        if next_hostname:
-                            # Re-validated per hop for the same reason
-                            # `check_url()` does it - a public URL that
-                            # redirects to an internal address must not
-                            # bypass the pre-request guard above.
-                            await assert_host_is_safe(next_hostname)
-                        logger.debug(
-                            "↪️ Speed test following redirect: %s -> %s",
-                            _redact_url_credentials(current_url), _redact_url_credentials(next_url),
-                        )
-                        current_url = next_url
-                        continue
+            data = await asyncio.wait_for(_run_hops(session), timeout=_SPEED_TEST_TIMEOUT_SECONDS)
 
-                    body, truncated = await read_capped_body(response, _MAX_SPEED_TEST_BODY_BYTES)
-                    total_ms = round((time.monotonic() - total_start) * 1000, 2)
-                    if truncated:
-                        logger.debug(
-                            "Speed test: response body truncated at %d bytes for %s",
-                            _MAX_SPEED_TEST_BODY_BYTES, _redact_url_credentials(current_url),
-                        )
-                    # `content_size_bytes` is exact when untruncated. When
-                    # truncated, prefer the declared Content-Length *only*
-                    # when the response has no Content-Encoding - aiohttp
-                    # auto-decompresses the body we read, so a compressed
-                    # Content-Length and the decompressed bytes we counted
-                    # are different units and must never be mixed. Also
-                    # sanity-checked against the capped byte count actually
-                    # observed: the target is a caller-supplied, untrusted
-                    # remote host, and HTTP doesn't guarantee a server's
-                    # declared Content-Length matches what it actually
-                    # sends - a malicious target could otherwise claim a
-                    # tiny Content-Length while streaming far more, and have
-                    # that spoofed value reported as fact - this is
-                    # detectable because we have hard proof (bytes actually
-                    # observed exceed the claim). An *overstated*
-                    # Content-Length is not symmetrically detectable: there
-                    # is no way to disprove a too-large claim without
-                    # draining the full stream, which would defeat the cap
-                    # entirely. content_size_bytes is therefore best-effort
-                    # and target-declared in that one case, same as any
-                    # other header a remote server controls. With no usable
-                    # (or provably-false) Content-Length, content_size_bytes
-                    # reports "at least this many bytes" (the capped count),
-                    # not the real total.
-                    if (
-                        truncated
-                        and "Content-Encoding" not in response.headers
-                        and response.content_length is not None
-                        and response.content_length >= len(body)
-                    ):
-                        content_size_bytes = response.content_length
-                    else:
-                        content_size_bytes = len(body)
-                    logger.info("Speed test completed for %s: status=%d", hostname, response.status)
-                    return envelope(True, "Speed test completed", data={
-                        "url": raw_url,
-                        "dns_time_ms": timings.get("dns_time_ms"),
-                        "connect_time_ms": timings.get("connect_time_ms"),
-                        "ttfb_ms": timings.get("ttfb_ms"),
-                        "total_time_ms": total_ms,
-                        "status_code": response.status,
-                        "content_size_bytes": content_size_bytes,
-                        "content_truncated": truncated,
-                        "error": None,
-                    })
-
+        if data is None:
             logger.warning("⚠️ Too many redirects for speed test: %s", _redact_url_credentials(raw_url))
             return _empty_speed_test_result(raw_url, _TOO_MANY_REDIRECTS_MESSAGE)
+        return envelope(True, "Speed test completed", data=data)
     except UnsafeHostError:
         # A redirect hop targeted a disallowed internal/private address -
         # discovered mid-request, same verdict as the pre-request guard.
         logger.warning("🚫 Blocked SSRF attempt for speed test (redirect hop): %s", hostname)
         return _empty_speed_test_result(raw_url, _SSRF_BLOCKED_MESSAGE)
-    except asyncio.TimeoutError:
+    except TimeoutError:
+        # `asyncio.wait_for()` raises the builtin `TimeoutError` (the same
+        # class as `asyncio.TimeoutError` since Python 3.11 - confirmed on
+        # both this project's dev venv, 3.13, and the VPS gunicorn venv,
+        # 3.12.3). Spelled as the builtin here to match
+        # `app/services/web_tools/summarize.py::fetch_webpage_text()`'s
+        # identical `except TimeoutError as e:` for the same shared-deadline
+        # pattern (api.pdfconverterai.com#109).
         logger.info("Speed test: %s timed out", hostname)
         return _empty_speed_test_result(raw_url, _CONNECT_ERROR_MESSAGES["timeout"])
     except aiohttp.ClientConnectorDNSError:
