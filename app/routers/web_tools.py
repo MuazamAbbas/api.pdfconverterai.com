@@ -1097,8 +1097,16 @@ async def speed_test(request: SpeedTestRequest, api_key: dict = Depends(verify_a
                     # declared Content-Length matches what it actually
                     # sends - a malicious target could otherwise claim a
                     # tiny Content-Length while streaming far more, and have
-                    # that spoofed value reported as fact. With no usable
-                    # (or trustworthy) Content-Length, content_size_bytes
+                    # that spoofed value reported as fact - this is
+                    # detectable because we have hard proof (bytes actually
+                    # observed exceed the claim). An *overstated*
+                    # Content-Length is not symmetrically detectable: there
+                    # is no way to disprove a too-large claim without
+                    # draining the full stream, which would defeat the cap
+                    # entirely. content_size_bytes is therefore best-effort
+                    # and target-declared in that one case, same as any
+                    # other header a remote server controls. With no usable
+                    # (or provably-false) Content-Length, content_size_bytes
                     # reports "at least this many bytes" (the capped count),
                     # not the real total.
                     if (
